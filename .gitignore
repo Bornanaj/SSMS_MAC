@@ -1,4 +1,19 @@
+# SwiftPM
 .build/
 .swiftpm/
+Package.resolved.backup
+
+# Generated bundles, disk images and icon art
+build/
 *.app
+*.dmg
+*.icns
+*.iconset/
+
+# Xcode
 DerivedData/
+*.xcuserstate
+*.xcworkspace/xcuserdata/
+
+# macOS
+.DS_Store

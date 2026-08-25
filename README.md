@@ -1,8 +1,13 @@
 # SSMS for Mac
 
+[![CI](https://github.com/Bornanaj/SSMS_MAC/actions/workflows/ci.yml/badge.svg)](https://github.com/Bornanaj/SSMS_MAC/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![macOS 14+](https://img.shields.io/badge/macOS-14%2B-black?logo=apple)](https://www.apple.com/macos/)
+[![Swift 6](https://img.shields.io/badge/Swift-6-orange?logo=swift)](https://swift.org)
+
 A native macOS SQL Server client in the shape of SQL Server Management Studio:
-Object Explorer, a T‑SQL editor with IntelliSense, a results grid, execution plans,
-scripting, an editable data grid, activity monitoring, backup/restore and flat‑file
+Object Explorer, a T-SQL editor with IntelliSense, a results grid, execution plans,
+scripting, an editable data grid, activity monitoring, backup/restore and flat-file
 import.
 
 It talks to SQL Server directly. There is **no ODBC driver, FreeTDS, Docker container
@@ -21,32 +26,63 @@ or JVM to install** — the TDS 7.4 protocol is implemented in Swift inside this
 └─────────────────────────────────────────────────────────────┘
 ```
 
+## Install
+
+### Build from source — recommended
+
+One command. The app is compiled on your machine, so macOS never quarantines it and
+opens it with **no Gatekeeper prompt**:
+
+```bash
+git clone https://github.com/Bornanaj/SSMS_MAC.git
+cd SSMS_MAC && ./Scripts/install.sh
+```
+
+Needs macOS 14+ and the Xcode Command Line Tools (`xcode-select --install`). Full Xcode
+is not required — the build uses SwiftPM and assembles the `.app` bundle by hand.
+
+### Homebrew
+
+```bash
+brew tap bornanaj/ssms https://github.com/Bornanaj/SSMS_MAC.git
+brew install --HEAD bornanaj/ssms/ssms-mac
+```
+
+### Disk image
+
+Grab the `.dmg` from [Releases](https://github.com/Bornanaj/SSMS_MAC/releases) and drag
+the app to Applications.
+
+Unless the release notes say the build is notarized, macOS will ask once:
+
+> Apple could not verify "SSMS for Mac" is free of malware…
+
+That is the quarantine flag macOS attaches to *anything* downloaded, not a problem with
+the app. Open it once with **right-click → Open → Open** and macOS remembers the choice.
+Clearing the flag outright also works:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/SSMS for Mac.app"
+```
+
+Removing that prompt for downloads requires an Apple Developer ID certificate and Apple
+notarization ($99/year); the release pipeline already implements it and switches on as
+soon as the signing secrets exist. [docs/CODE_SIGNING.md](docs/CODE_SIGNING.md) explains
+the whole mechanism.
+
 ## Requirements
 
 - macOS 14 or later, Apple silicon or Intel
 - Swift 6 toolchain — the **Command Line Tools are enough**, Xcode is not required
 - A reachable SQL Server 2016–2022, Azure SQL Database, or Azure SQL Managed Instance
 
-## Build and run
+## Building by hand
 
 ```bash
-./Scripts/build-app.sh release
-open "build/SSMS for Mac.app"
+swift build -c release          # libraries and executables
+./Scripts/build-app.sh release  # -> build/SSMS for Mac.app
+./Scripts/make-dmg.sh release   # -> build/SSMS-for-Mac-1.0.0.dmg
 ```
-
-`Scripts/build-app.sh` compiles with SwiftPM, generates the icon and assembles the `.app`
-bundle by hand, so no Xcode project is involved.
-
-To produce an installer disk image instead:
-
-```bash
-./Scripts/make-dmg.sh release      # -> build/SSMS-for-Mac-1.0.0.dmg
-```
-
-The build is signed ad hoc rather than with an Apple Developer ID, so the first launch
-needs **right-click → Open** once. macOS remembers the choice afterwards. If a copy picks
-up the quarantine flag along the way, clear it with
-`xattr -dr com.apple.quarantine "/Applications/SSMS for Mac.app"`.
 
 ## Features
 
@@ -132,6 +168,16 @@ docker run -d --platform linux/amd64 --name ssms-mac-test \
 - Always On, Replication, Service Broker and SQL Agent job editing are not implemented;
   SQL Agent jobs are listed but not editable.
 
+## Contributing
+
+Issues and pull requests are welcome. `./Scripts/test.sh` runs the offline suite, plus
+the live suites when a SQL Server is reachable on `SQL_HOST:SQL_PORT`. CI runs the
+offline suite and builds the bundle on every push.
+
+## Licence
+
+MIT — see [LICENSE](LICENSE).
+
 ## Layout
 
 ```
@@ -141,6 +187,14 @@ Sources/
   SSMSMac/         SwiftUI app
   SSMSTests/       offline regression suite
   TDSCLI/          live service smoke tests
-Scripts/build-app.sh
-docs/ARCHITECTURE.md
+Scripts/
+  install.sh           build from source and install into /Applications
+  build-app.sh         SwiftPM build plus .app assembly
+  make-icon.swift      generates the icon, so no binary art is checked in
+  make-dmg.sh          packages the disk image
+  sign-and-notarize.sh Developer ID signing and Apple notarization
+  test.sh              offline suite, then the live suites when a server answers
+docs/
+  ARCHITECTURE.md      protocol and design notes
+  CODE_SIGNING.md      Gatekeeper, signing and notarization
 ```

@@ -11,7 +11,15 @@ STAGING="$ROOT/build/dmg-staging"
 DMG="$ROOT/build/SSMS-for-Mac-$VERSION.dmg"
 
 cd "$ROOT"
-"$ROOT/Scripts/build-app.sh" "$CONFIG"
+# "release-skip-build" reuses the bundle already in build/, which is how the
+# signing pipeline avoids clobbering a Developer ID signature with a fresh
+# ad-hoc one.
+if [ "$CONFIG" = "release-skip-build" ]; then
+    [ -d "$ROOT/build/SSMS for Mac.app" ] || {
+        echo "no app bundle to package; run Scripts/build-app.sh first"; exit 1; }
+else
+    "$ROOT/Scripts/build-app.sh" "$CONFIG"
+fi
 
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
     "$ROOT/build/SSMS for Mac.app/Contents/Info.plist")"

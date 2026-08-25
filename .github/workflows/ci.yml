@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show the toolchain
+        run: |
+          sw_vers
+          swift --version
+          xcode-select -p
+
+      - name: Cache SwiftPM dependencies
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: spm-${{ runner.os }}-${{ hashFiles('Package.resolved', 'Package.swift') }}
+          restore-keys: spm-${{ runner.os }}-
+
+      - name: Build
+        run: swift build -v
+
+      - name: Offline regression suite
+        run: swift run ssms-tests
+
+      - name: Assemble the app bundle
+        run: ./Scripts/build-app.sh debug
+
+      - name: Verify the bundle
+        run: |
+          APP="build/SSMS for Mac.app"
+          test -x "$APP/Contents/MacOS/SSMS for Mac"
+          test -f "$APP/Contents/Info.plist"
+          test -f "$APP/Contents/Resources/AppIcon.icns"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist"
+          codesign --verify --verbose=2 "$APP"
+
+      - name: Build the disk image
+        run: ./Scripts/make-dmg.sh debug
+
+      - name: Upload the build
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssms-mac-dev-build
+          path: build/*.dmg
+          retention-days: 7
