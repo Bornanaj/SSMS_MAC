@@ -133,3 +133,32 @@ public enum QueryEvent
 8. Do NOT run `swift build` – several agents share this checkout and would collide.
    Write correct code and stop.
 9. Only create the files listed in your task. Never edit files owned by another task.
+
+## Object Explorer node model (already written – use as-is, do not redefine)
+
+`Sources/SQLServerKit/Metadata/ObjectExplorerNode.swift` defines:
+
+- `enum ObjectNodeKind` – server, folder, database, table, view, column, index,
+  primaryKey, uniqueKey, foreignKey, checkConstraint, defaultConstraint, trigger,
+  storedProcedure, scalarFunction, tableValuedFunction, aggregateFunction, synonym,
+  sequence, userDefinedDataType, userDefinedTableType, schema, databaseUser,
+  databaseRole, applicationRole, login, serverRole, credential, linkedServer,
+  filegroup, databaseFile, parameter, statistic, assembly, xmlSchemaCollection,
+  partitionFunction, partitionScheme, agentJob, externalTable, securityPolicy, unknown
+- `enum ObjectFolderKind` – databases, systemDatabases, tables, systemTables, views,
+  systemViews, columns, keys, constraints, indexes, triggers, statistics,
+  programmability, storedProcedures, systemStoredProcedures, functions,
+  tableValuedFunctions, scalarValuedFunctions, aggregateFunctions, systemFunctions,
+  types, userDefinedDataTypes, userDefinedTableTypes, sequences, synonyms, security,
+  databaseUsers, databaseRoles, applicationRoles, schemas, serverObjects, logins,
+  serverRoles, credentials, linkedServers, management, agent, agentJobs, storage,
+  filegroups, databaseFiles, parameters, assemblies, xmlSchemaCollections,
+  partitionSchemes, partitionFunctions, securityPolicies, and more (see the file)
+- `struct ObjectExplorerNode: Identifiable, Hashable, Sendable` with
+  `id, parentID, kind, folder, label, detail, iconName, isExpandable, database,
+   schema, name, objectID, isSystemObject, info: [String: String]`
+  plus `qualifiedName`, `displayPath`, `isTableLike`, `isModule`
+- `struct ObjectExplorerOptions` with `showSystemObjects, nameFilter, maxChildren`
+
+Node ids are path strings: `"<sessionUUID>/db:AdventureWorks/folder:tables/table:dbo.Person"`.
+Build them with a helper in your own file; keep them stable across refreshes.

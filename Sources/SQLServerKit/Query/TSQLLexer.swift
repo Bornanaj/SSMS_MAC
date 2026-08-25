@@ -34,7 +34,7 @@ public struct TSQLToken: Sendable, Hashable {
 
 /// A hand written T-SQL lexer. It is deliberately tolerant: unknown input is
 /// emitted as `.unknown` rather than throwing, because it runs on every keystroke.
-public struct TSQLLexer {
+public struct TSQLLexer: Sendable {
 
     public init() {}
 
