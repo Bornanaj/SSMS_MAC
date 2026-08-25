@@ -119,6 +119,14 @@ final class SQLTextView: NSTextView {
 
     // MARK: - Completion
 
+    /// AppKit binds Escape to `complete:`, so the key that should dismiss the
+    /// completion list is the one that summons it — and whatever was highlighted then
+    /// gets committed by the next keystroke. In a SQL editor Escape only ever cancels.
+    override func cancelOperation(_ sender: Any?) {
+        completionTimer?.invalidate()
+        completionTimer = nil
+    }
+
     override var rangeForUserCompletion: NSRange {
         let text = string as NSString
         let caret = selectedRange().location
@@ -139,7 +147,11 @@ final class SQLTextView: NSTextView {
         let prefix = (string as NSString).substring(with: charRange)
         let items = sqlDelegate?.sqlTextView(self, completionsFor: prefix, range: charRange) ?? []
         lastCompletionItems = items
-        index?.pointee = items.isEmpty ? -1 : 0
+        // Deliberately leave nothing preselected. With a highlighted row, any key that
+        // ends the session — including a command shortcut such as Execute — commits it,
+        // so a query gains a stray keyword just as it is about to run. Arrow keys pick a
+        // candidate, and only then does Return or Tab insert it.
+        index?.pointee = -1
         return items.isEmpty ? nil : items.map(\.label)
     }
 
