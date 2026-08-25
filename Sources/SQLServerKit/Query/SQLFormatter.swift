@@ -57,10 +57,16 @@ public struct SQLFormatter: Sendable {
         var pendingBlankLines = 0
         var inSelectList = false
 
-        func newline(extra: Int = 0) {
+        // Emits the line break only; callers write the indentation themselves so it
+        // never ends up applied twice.
+        func newline() {
             guard !atLineStart else { return }
-            output += "\n" + String(repeating: " ", count: max(0, (indent + extra) * style.indentWidth))
+            output += "\n"
             atLineStart = true
+        }
+
+        func indentLine(extra: Int = 0) {
+            output += String(repeating: " ", count: max(0, (indent + extra) * style.indentWidth))
         }
 
         func emit(_ text: String, spaceBefore: Bool = true) {
@@ -90,7 +96,7 @@ public struct SQLFormatter: Sendable {
             case .lineComment, .blockComment:
                 if pendingBlankLines > 0 { output += "\n"; pendingBlankLines = 0 }
                 newline()
-                output += String(repeating: " ", count: max(0, indent * style.indentWidth))
+                indentLine()
                 output += token.text
                 output += "\n"
                 atLineStart = true
@@ -109,7 +115,7 @@ public struct SQLFormatter: Sendable {
             if pendingBlankLines > 0 {
                 newline()
                 output += "\n"
-                output += String(repeating: " ", count: max(0, indent * style.indentWidth))
+                indentLine()
                 atLineStart = true
                 pendingBlankLines = 0
             }
@@ -130,7 +136,7 @@ public struct SQLFormatter: Sendable {
                !(previous.map { SQLFormatter.joinStarters.contains($0.text.uppercased()) } ?? false) {
                 inSelectList = false
                 newline()
-                output += String(repeating: " ", count: max(0, indent * style.indentWidth))
+                indentLine()
                 emit(cased(token), spaceBefore: false)
                 index += 1
                 previous = token
@@ -140,7 +146,7 @@ public struct SQLFormatter: Sendable {
             if isWord, parenDepth == 0, SQLFormatter.majorClauses.contains(upper) {
                 if upper == "END" { indent = max(0, indent - 1) }
                 newline()
-                output += String(repeating: " ", count: max(0, indent * style.indentWidth))
+                indentLine()
                 emit(cased(token), spaceBefore: false)
                 if upper == "BEGIN" { indent += 1 }
                 inSelectList = (upper == "SELECT")
@@ -150,8 +156,8 @@ public struct SQLFormatter: Sendable {
             }
 
             if isWord, SQLFormatter.continuations.contains(upper), parenDepth == 0 {
-                newline(extra: 1)
-                output += String(repeating: " ", count: max(0, (indent + 1) * style.indentWidth))
+                newline()
+                indentLine(extra: 1)
                 emit(cased(token), spaceBefore: false)
                 index += 1
                 previous = token
@@ -170,8 +176,8 @@ public struct SQLFormatter: Sendable {
                     output += ","
                     atLineStart = false
                     if parenDepth == 0 && inSelectList && style.alignColumns {
-                        newline(extra: 1)
-                        output += String(repeating: " ", count: max(0, (indent + 1) * style.indentWidth))
+                        newline()
+                        indentLine(extra: 1)
                     }
                 case ";":
                     emit(";", spaceBefore: false)

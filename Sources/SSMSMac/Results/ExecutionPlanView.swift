@@ -80,7 +80,10 @@ struct ExecutionPlanView: View {
             }
 
             if let root = statement.root {
-                planTree(root, totalCost: max(statement.subtreeCost, root.estimatedTotalSubtreeCost), depth: 0)
+                PlanTreeRow(node: root,
+                            totalCost: max(statement.subtreeCost, root.estimatedTotalSubtreeCost),
+                            depth: 0,
+                            selected: $selected)
             }
         }
         .padding(10)
@@ -107,80 +110,6 @@ struct ExecutionPlanView: View {
         }
         .padding(8)
         .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
-    }
-
-    @ViewBuilder
-    private func planTree(_ node: PlanNode, totalCost: Double, depth: Int) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            operatorRow(node, totalCost: totalCost, depth: depth)
-            ForEach(node.children) { child in
-                planTree(child, totalCost: totalCost, depth: depth + 1)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func operatorRow(_ node: PlanNode, totalCost: Double, depth: Int) -> some View {
-        let percent = totalCost > 0 ? node.operatorCost / totalCost * 100 : 0
-        HStack(spacing: 8) {
-            Color.clear.frame(width: CGFloat(depth) * 18, height: 1)
-            Image(systemName: node.symbol)
-                .foregroundStyle(percent >= 25 ? Color.orange : Color.accentColor)
-                .frame(width: 18)
-            VStack(alignment: .leading, spacing: 1) {
-                HStack(spacing: 6) {
-                    Text(node.physicalOp).font(.callout.weight(.medium))
-                    if node.isParallel {
-                        Image(systemName: "arrow.triangle.branch").foregroundStyle(.secondary)
-                    }
-                    if !node.warnings.isEmpty {
-                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                    }
-                }
-                if let object = node.objectName {
-                    Text(node.indexName.map { "\(object) · \($0)" } ?? object)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            Spacer(minLength: 12)
-            Text(rowsLabel(node))
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
-            costBar(percent: percent)
-        }
-        .padding(.vertical, 3)
-        .padding(.horizontal, 6)
-        .background(selected?.id == node.id ? Color.accentColor.opacity(0.15) : Color.clear,
-                    in: RoundedRectangle(cornerRadius: 5))
-        .contentShape(Rectangle())
-        .onTapGesture { selected = node }
-    }
-
-    private func rowsLabel(_ node: PlanNode) -> String {
-        if let actual = node.actualRows {
-            return "\(Int(actual)) / \(Int(node.estimateRows.rounded())) rows"
-        }
-        return "\(Int(node.estimateRows.rounded())) rows"
-    }
-
-    @ViewBuilder
-    private func costBar(percent: Double) -> some View {
-        HStack(spacing: 5) {
-            GeometryReader { geometry in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(Color.secondary.opacity(0.18))
-                    Capsule()
-                        .fill(percent >= 25 ? Color.orange : Color.accentColor)
-                        .frame(width: max(2, geometry.size.width * min(percent / 100, 1)))
-                }
-            }
-            .frame(width: 70, height: 6)
-            Text(String(format: "%.0f%%", percent))
-                .font(.caption.monospacedDigit())
-                .frame(width: 36, alignment: .trailing)
-                .foregroundStyle(.secondary)
-        }
     }
 
     @ViewBuilder
@@ -247,6 +176,89 @@ struct ExecutionPlanView: View {
                 .font(.system(.caption, design: .monospaced))
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+
+/// Recursive operator row. This has to be its own `View` type: a function returning
+/// `some View` cannot call itself.
+private struct PlanTreeRow: View {
+    let node: PlanNode
+    let totalCost: Double
+    let depth: Int
+    @Binding var selected: PlanNode?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            operatorRow(node, totalCost: totalCost, depth: depth)
+            ForEach(node.children) { child in
+                PlanTreeRow(node: child, totalCost: totalCost, depth: depth + 1, selected: $selected)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func operatorRow(_ node: PlanNode, totalCost: Double, depth: Int) -> some View {
+        let percent = totalCost > 0 ? node.operatorCost / totalCost * 100 : 0
+        HStack(spacing: 8) {
+            Color.clear.frame(width: CGFloat(depth) * 18, height: 1)
+            Image(systemName: node.symbol)
+                .foregroundStyle(percent >= 25 ? Color.orange : Color.accentColor)
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 6) {
+                    Text(node.physicalOp).font(.callout.weight(.medium))
+                    if node.isParallel {
+                        Image(systemName: "arrow.triangle.branch").foregroundStyle(.secondary)
+                    }
+                    if !node.warnings.isEmpty {
+                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                    }
+                }
+                if let object = node.objectName {
+                    Text(node.indexName.map { "\(object) · \($0)" } ?? object)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 12)
+            Text(rowsLabel(node))
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+            costBar(percent: percent)
+        }
+        .padding(.vertical, 3)
+        .padding(.horizontal, 6)
+        .background(selected?.id == node.id ? Color.accentColor.opacity(0.15) : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 5))
+        .contentShape(Rectangle())
+        .onTapGesture { selected = node }
+    }
+
+    private func rowsLabel(_ node: PlanNode) -> String {
+        if let actual = node.actualRows {
+            return "\(Int(actual)) / \(Int(node.estimateRows.rounded())) rows"
+        }
+        return "\(Int(node.estimateRows.rounded())) rows"
+    }
+
+    @ViewBuilder
+    private func costBar(percent: Double) -> some View {
+        HStack(spacing: 5) {
+            GeometryReader { geometry in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.secondary.opacity(0.18))
+                    Capsule()
+                        .fill(percent >= 25 ? Color.orange : Color.accentColor)
+                        .frame(width: max(2, geometry.size.width * min(percent / 100, 1)))
+                }
+            }
+            .frame(width: 70, height: 6)
+            Text(String(format: "%.0f%%", percent))
+                .font(.caption.monospacedDigit())
+                .frame(width: 36, alignment: .trailing)
+                .foregroundStyle(.secondary)
         }
     }
 }

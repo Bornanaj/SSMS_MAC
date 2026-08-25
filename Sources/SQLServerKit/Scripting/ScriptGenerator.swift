@@ -325,7 +325,11 @@ public struct ScriptGenerator: Sendable {
 
     private func selectStatement(database: String, schema: String, table: String,
                                  columns: [ScriptColumn], options: ScriptOptions) -> String {
-        let list = columns.map { "      " + SQLIdentifier.quote($0.name) }.joined(separator: "\n      ,")
+        // SSMS puts the first column on the SELECT line and prefixes the rest with ",".
+        let quoted = columns.map { SQLIdentifier.quote($0.name) }
+        let list = quoted.enumerated()
+            .map { $0.offset == 0 ? $0.element : "      ," + $0.element }
+            .joined(separator: "\n")
         let target = database.isEmpty
             ? qualified(schema: schema, name: table, options: options)
             : SQLIdentifier.quote(database: database, schema: schema, name: table)
@@ -335,7 +339,7 @@ public struct ScriptGenerator: Sendable {
         }
         out += "SELECT "
         out += options.selectTopRows > 0 ? "TOP (\(options.selectTopRows)) " : ""
-        out += "\n" + list + "\n  FROM \(target)\n"
+        out += list + "\n  FROM \(target)\n"
         return out
     }
 

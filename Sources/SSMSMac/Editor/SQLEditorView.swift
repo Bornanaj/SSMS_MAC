@@ -40,7 +40,8 @@ struct SQLEditorView: NSViewRepresentable {
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = !settings.editorWordWrap
         textView.minSize = NSSize(width: 0, height: 0)
-        textView.maxSize = NSSize(width: .greatestFiniteMagnitude, height: .greatestFiniteMagnitude)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
+                                  height: CGFloat.greatestFiniteMagnitude)
         textView.string = tab.text
 
         scrollView.documentView = textView
@@ -86,6 +87,7 @@ struct SQLEditorView: NSViewRepresentable {
 
     // MARK: - Coordinator
 
+    @MainActor
     final class Coordinator: NSObject, NSTextViewDelegate, SQLTextViewDelegate {
         var tab: QueryTab
         var settings: AppSettings

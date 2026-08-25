@@ -1,3 +1,4 @@
+import Foundation
 import NIOCore
 
 /// TDS packet types (MS-TDS 2.2.3.1.1).
@@ -122,13 +123,23 @@ public struct TDSPacketDecoder: ByteToMessageDecoder {
 }
 
 /// Fragments an outbound `TDSMessage` into correctly sized packets.
-final class TDSPacketEncoder: MessageToByteEncoder {
+///
+/// Each packet is written and flushed on its own. That matters once TLS is in play:
+/// SQL Server negotiates encryption by wrapping the handshake in PRELOGIN packets and
+/// then keeps reading one TDS packet per TLS record, so batching several packets into
+/// a single record makes the server drop the connection. Flushing per packet keeps the
+/// one-to-one mapping every other TDS driver relies on.
+final class TDSPacketWriter: ChannelOutboundHandler {
     typealias OutboundIn = TDSMessage
+    typealias OutboundOut = ByteBuffer
 
     /// Negotiated packet size; updated by ENVCHANGE type 4.
     var packetSize: Int = TDSPacket.defaultPacketSize
 
-    func encode(data message: TDSMessage, out: inout ByteBuffer) throws {
+    private static let debugEnabled = ProcessInfo.processInfo.environment["TDS_DEBUG"] != nil
+
+    func write(context: ChannelHandlerContext, data: NIOAny, promise: EventLoopPromise<Void>?) {
+        let message = unwrapOutboundIn(data)
         var payload = message.payload
         let maxPayload = max(packetSize - TDSPacket.headerLength, 128)
         var packetID: UInt8 = 1
@@ -136,7 +147,11 @@ final class TDSPacketEncoder: MessageToByteEncoder {
         if payload.readableBytes == 0 {
             var status = TDSPacketStatus.endOfMessage
             if message.resetConnection { status.insert(.resetConnection) }
-            writeHeader(type: message.type, status: status, payloadLength: 0, packetID: packetID, into: &out)
+            var buffer = context.channel.allocator.buffer(capacity: TDSPacket.headerLength)
+            writeHeader(type: message.type, status: status, payloadLength: 0,
+                        packetID: packetID, into: &buffer)
+            context.write(wrapOutboundOut(buffer), promise: promise)
+            context.flush()
             return
         }
 
@@ -145,11 +160,24 @@ final class TDSPacketEncoder: MessageToByteEncoder {
             let chunkLength = min(maxPayload, payload.readableBytes)
             guard let chunk = payload.readSlice(length: chunkLength) else { break }
             var status = TDSPacketStatus.normal
-            if payload.readableBytes == 0 { status.insert(.endOfMessage) }
+            let isLast = payload.readableBytes == 0
+            if isLast { status.insert(.endOfMessage) }
             if first && message.resetConnection { status.insert(.resetConnection) }
+
+            var buffer = context.channel.allocator.buffer(
+                capacity: chunkLength + TDSPacket.headerLength)
             writeHeader(type: message.type, status: status, payloadLength: chunkLength,
-                        packetID: packetID, into: &out)
-            out.writeImmutableBuffer(chunk)
+                        packetID: packetID, into: &buffer)
+            buffer.writeImmutableBuffer(chunk)
+
+            if TDSPacketWriter.debugEnabled {
+                let line = "[tds] out type=\(message.type) id=\(packetID) len=\(chunkLength) eom=\(isLast) remaining=\(payload.readableBytes)\n"
+                FileHandle.standardError.write(Data(line.utf8))
+            }
+
+            context.write(wrapOutboundOut(buffer), promise: isLast ? promise : nil)
+            context.flush()
+
             packetID = packetID == 255 ? 1 : packetID &+ 1
             first = false
         }

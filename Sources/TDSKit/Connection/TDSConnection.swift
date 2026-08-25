@@ -40,7 +40,7 @@ public final class TDSConnection: @unchecked Sendable {
     public private(set) var featureAcks: [UInt8: [UInt8]] = [:]
 
     private let handler: TDSConnectionHandler
-    private let encoder: TDSPacketEncoder
+    private let encoder: TDSPacketWriter
     private let group: EventLoopGroup
     private let stateLock = NIOLock()
     private var transactionDescriptor: UInt64 = 0
@@ -53,7 +53,7 @@ public final class TDSConnection: @unchecked Sendable {
 
     private init(channel: Channel,
                  handler: TDSConnectionHandler,
-                 encoder: TDSPacketEncoder,
+                 encoder: TDSPacketWriter,
                  configuration: TDSConfiguration,
                  group: EventLoopGroup) {
         self.channel = channel
@@ -102,7 +102,7 @@ public final class TDSConnection: @unchecked Sendable {
 
     private static func openChannel(config: TDSConfiguration,
                                     group: EventLoopGroup) async throws -> TDSConnection {
-        let encoder = TDSPacketEncoder()
+        let encoder = TDSPacketWriter()
         encoder.packetSize = config.packetSize
         let handler = TDSConnectionHandler(allocator: ByteBufferAllocator())
 
@@ -120,7 +120,7 @@ public final class TDSConnection: @unchecked Sendable {
                     }
                     try channel.pipeline.syncOperations.addHandlers([
                         ByteToMessageHandler(TDSPacketDecoder()),
-                        MessageToByteHandler(encoder),
+                        encoder,
                         handler
                     ])
                     return channel.eventLoop.makeSucceededVoidFuture()

@@ -187,6 +187,17 @@ public actor IntelliSenseProvider {
 
         switch context.kind {
         case .memberOf(let qualifier):
+            // "EXEC sales." must not offer tables, so honour the surrounding statement.
+            if context.prefersRoutines, let catalog,
+               catalog.schemas.contains(where: { $0.caseInsensitiveCompare(
+                   IntelliSenseCatalog.unquote(qualifier)) == .orderedSame }) {
+                return catalog.routines
+                    .filter { $0.schema.caseInsensitiveCompare(
+                        IntelliSenseCatalog.unquote(qualifier)) == .orderedSame }
+                    .map { CompletionItem.make(label: $0.name,
+                                               kind: $0.kind == "procedure" ? .procedure : .function,
+                                               detail: $0.qualifiedName, priority: 60) }
+            }
             return memberCompletions(qualifier: qualifier, context: context, catalog: catalog)
 
         case .tableReference:
@@ -476,6 +487,8 @@ struct IntelliSenseContext {
     var kind: Kind = .general
     var sources: [Source] = []
     var variables: [String] = []
+    /// True when the statement is an EXEC, so only routines make sense.
+    var prefersRoutines = false
 
     static func analyse(tokens: [TSQLToken], offset: Int) -> IntelliSenseContext {
         var context = IntelliSenseContext()
@@ -514,6 +527,15 @@ struct IntelliSenseContext {
         }
 
         if anchor.kind == .punctuation && anchor.text == "." {
+            // Look back past "schema." for an EXEC that governs this reference.
+            var scan = anchorIndex - 2
+            while scan >= statement.lowerBound {
+                let token = significant[scan]
+                let word = token.text.uppercased()
+                if word == "EXEC" || word == "EXECUTE" { context.prefersRoutines = true; break }
+                if token.kind == .punctuation && token.text == "." { scan -= 1; continue }
+                break
+            }
             let qualifierIndex = anchorIndex - 1
             if qualifierIndex >= 0 {
                 let qualifier = significant[qualifierIndex]

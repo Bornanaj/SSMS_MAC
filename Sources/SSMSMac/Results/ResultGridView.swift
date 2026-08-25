@@ -53,6 +53,7 @@ struct ResultGridView: NSViewRepresentable {
 
     // MARK: - Coordinator
 
+    @MainActor
     final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         var model: ResultSetModel
         var settings: AppSettings

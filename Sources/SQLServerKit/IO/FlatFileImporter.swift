@@ -200,9 +200,10 @@ public struct FlatFileImporter: Sendable {
     /// Pick the delimiter that yields the most consistent field count across sample lines.
     static func sniffDelimiter(in text: String) -> String {
         let candidates = [",", ";", "\t", "|"]
-        let lines = text.split(separator: "\n", maxSplits: 20, omittingEmptySubsequences: true)
+        let lines = text.unicodeScalars
+            .split(separator: "\n", maxSplits: 20, omittingEmptySubsequences: true)
             .prefix(20)
-            .map(String.init)
+            .map { String(String.UnicodeScalarView($0)) }
         guard !lines.isEmpty else { return "," }
 
         var best = ","
@@ -345,26 +346,35 @@ public struct FlatFileImporter: Sendable {
 }
 
 /// RFC 4180 CSV reader that keeps quoted fields containing delimiters and newlines intact.
+///
+/// It walks unicode scalars rather than `Character`s on purpose: Swift treats CRLF as a
+/// single grapheme cluster, so a Character-based scan silently fails to split rows in
+/// files written with Windows line endings.
 enum CSVParser {
 
     /// `limit` of 0 means "read every row".
     static func parse(_ text: String, delimiter: Character, limit: Int) -> [[String]] {
+        let separator = delimiter.unicodeScalars.first ?? ","
+        let quote: Unicode.Scalar = "\""
+        let carriageReturn: Unicode.Scalar = "\r"
+        let newline: Unicode.Scalar = "\n"
+
         var rows: [[String]] = []
-        var field = ""
+        var field = String.UnicodeScalarView()
         var row: [String] = []
         var inQuotes = false
 
-        let characters = Array(text)
+        let scalars = Array(text.unicodeScalars)
         var index = 0
-        let count = characters.count
+        let count = scalars.count
 
         while index < count {
-            let character = characters[index]
+            let scalar = scalars[index]
 
             if inQuotes {
-                if character == "\"" {
-                    if index + 1 < count, characters[index + 1] == "\"" {
-                        field.append("\"")
+                if scalar == quote {
+                    if index + 1 < count, scalars[index + 1] == quote {
+                        field.append(quote)
                         index += 2
                         continue
                     }
@@ -372,36 +382,36 @@ enum CSVParser {
                     index += 1
                     continue
                 }
-                field.append(character)
+                field.append(scalar)
                 index += 1
                 continue
             }
 
-            switch character {
-            case "\"":
+            switch scalar {
+            case quote:
                 inQuotes = true
                 index += 1
-            case delimiter:
-                row.append(field)
-                field = ""
+            case separator:
+                row.append(String(field))
+                field = String.UnicodeScalarView()
                 index += 1
-            case "\r":
+            case carriageReturn:
                 index += 1
-            case "\n":
-                row.append(field)
+            case newline:
+                row.append(String(field))
                 rows.append(row)
-                field = ""
+                field = String.UnicodeScalarView()
                 row = []
                 index += 1
                 if limit > 0 && rows.count >= limit { return rows }
             default:
-                field.append(character)
+                field.append(scalar)
                 index += 1
             }
         }
 
         if !field.isEmpty || !row.isEmpty {
-            row.append(field)
+            row.append(String(field))
             rows.append(row)
         }
         return rows
