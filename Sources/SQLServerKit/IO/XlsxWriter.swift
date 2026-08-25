@@ -361,11 +361,19 @@ private struct XlsxZipArchive {
         calendar.timeZone = TimeZone.current
         let parts = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second],
                                             from: Date())
-        let year = max(1980, parts.year ?? 1980)
-        let time = UInt16((parts.hour ?? 0) << 11 | (parts.minute ?? 0) << 5
-            | ((parts.second ?? 0) / 2))
-        let date = UInt16((year - 1980) << 9 | (parts.month ?? 1) << 5 | (parts.day ?? 1))
-        return (time, date)
+        // Each field is bound to an explicitly typed local. Folding the shifts into one
+        // expression is valid Swift but pushes the type checker past its budget on some
+        // toolchains, which fails the build rather than merely slowing it down.
+        let year: Int = max(1980, parts.year ?? 1980)
+        let month: Int = parts.month ?? 1
+        let day: Int = parts.day ?? 1
+        let hour: Int = parts.hour ?? 0
+        let minute: Int = parts.minute ?? 0
+        let second: Int = parts.second ?? 0
+
+        let packedTime: Int = (hour << 11) | (minute << 5) | (second / 2)
+        let packedDate: Int = ((year - 1980) << 9) | (month << 5) | day
+        return (UInt16(truncatingIfNeeded: packedTime), UInt16(truncatingIfNeeded: packedDate))
     }
 }
 
