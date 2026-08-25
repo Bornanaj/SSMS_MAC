@@ -43,6 +43,8 @@ public final class TDSConnection: @unchecked Sendable {
     private let encoder: TDSPacketWriter
     private let group: EventLoopGroup
     private let stateLock = NIOLock()
+    /// One request at a time; see AsyncLock for why an actor is not enough.
+    private let requestLock = AsyncLock()
     private var transactionDescriptor: UInt64 = 0
     private var _inTransaction = false
     private var _isClosed = false
@@ -336,27 +338,37 @@ public final class TDSConnection: @unchecked Sendable {
     // MARK: - Low level send
 
     private func sendRaw(type: TDSPacketType, payload: ByteBuffer) async throws -> ByteBuffer {
-        let promise = channel.eventLoop.makePromise(of: ByteBuffer.self)
-        try await channel.eventLoop.submit { [handler, channel] in
-            guard !handler.isBusy else { throw TDSError.busy }
-            handler.beginRaw(promise: promise)
-            channel.writeAndFlush(TDSMessage(type: type, payload: payload), promise: nil)
-        }.get()
-        return try await promise.futureResult.get()
+        try await requestLock.withLock {
+            // The promise is created and handed to the handler inside the same event
+            // loop hop, so a failure here can never strand an unfulfilled promise.
+            let future: EventLoopFuture<ByteBuffer> = try await channel.eventLoop.submit {
+                [handler, channel] () -> EventLoopFuture<ByteBuffer> in
+                guard !handler.isBusy else { throw TDSError.busy }
+                let promise = channel.eventLoop.makePromise(of: ByteBuffer.self)
+                handler.beginRaw(promise: promise)
+                channel.writeAndFlush(TDSMessage(type: type, payload: payload), promise: nil)
+                return promise.futureResult
+            }.get()
+            return try await future.get()
+        }
     }
 
     private func sendTokens(type: TDSPacketType,
                             payload: ByteBuffer,
                             resetConnection: Bool = false,
                             sink: @escaping (TDSStreamEvent) -> Void) async throws {
-        let promise = channel.eventLoop.makePromise(of: Void.self)
-        try await channel.eventLoop.submit { [handler, channel] in
-            guard !handler.isBusy else { throw TDSError.busy }
-            handler.beginTokens(sink: sink, promise: promise)
-            channel.writeAndFlush(TDSMessage(type: type, payload: payload,
-                                             resetConnection: resetConnection), promise: nil)
-        }.get()
-        return try await promise.futureResult.get()
+        try await requestLock.withLock {
+            let future: EventLoopFuture<Void> = try await channel.eventLoop.submit {
+                [handler, channel] () -> EventLoopFuture<Void> in
+                guard !handler.isBusy else { throw TDSError.busy }
+                let promise = channel.eventLoop.makePromise(of: Void.self)
+                handler.beginTokens(sink: sink, promise: promise)
+                channel.writeAndFlush(TDSMessage(type: type, payload: payload,
+                                                 resetConnection: resetConnection), promise: nil)
+                return promise.futureResult
+            }.get()
+            try await future.get()
+        }
     }
 
     // MARK: - Executing

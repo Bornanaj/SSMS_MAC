@@ -173,8 +173,8 @@ private func readLE32(_ bytes: [UInt8], at offset: Int) -> UInt32 {
 }
 
 /// MD4 – required by NTLM and absent from CryptoKit.
-enum MD4 {
-    static func hash(bytes input: [UInt8]) -> [UInt8] {
+public enum MD4 {
+    public static func hash(bytes input: [UInt8]) -> [UInt8] {
         var message = input
         let bitLength = UInt64(input.count) * 8
         message.append(0x80)

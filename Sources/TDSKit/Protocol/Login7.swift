@@ -237,7 +237,7 @@ public struct Login7Request {
     }
 
     /// The classic TDS password scramble: swap nibbles, then XOR with 0xA5.
-    static func obfuscate(_ bytes: [UInt8]) -> [UInt8] {
+    public static func obfuscate(_ bytes: [UInt8]) -> [UInt8] {
         bytes.map { b in
             let swapped = (b << 4) | (b >> 4)
             return swapped ^ 0xA5

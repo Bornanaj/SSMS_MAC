@@ -273,6 +273,7 @@ public final class QueryExecutor: @unchecked Sendable {
             _ = try? await connection.query(epilogue.joined(separator: "\n"))
         }
 
+        if isCancelled { summary.cancelled = true }
         summary.finishedAt = Date()
         summary.elapsed = Date().timeIntervalSince(overallStart)
         summary.statistics.clientExecutionTime = summary.elapsed

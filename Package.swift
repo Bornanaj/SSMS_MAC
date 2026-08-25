@@ -8,7 +8,8 @@ let package = Package(
         .library(name: "TDSKit", targets: ["TDSKit"]),
         .library(name: "SQLServerKit", targets: ["SQLServerKit"]),
         .executable(name: "ssms-mac", targets: ["SSMSMac"]),
-        .executable(name: "tdscli", targets: ["TDSCLI"])
+        .executable(name: "tdscli", targets: ["TDSCLI"]),
+        .executable(name: "ssms-tests", targets: ["SSMSTests"])
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
@@ -37,13 +38,17 @@ let package = Package(
             swiftSettings: [.swiftLanguageMode(.v5), .unsafeFlags(["-parse-as-library"])]
         ),
         .executableTarget(
-            name: "TDSCLI",
-            dependencies: ["SQLServerKit", "TDSKit"],
+            name: "SSMSTests",
+            dependencies: [
+                "SQLServerKit", "TDSKit",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOEmbedded", package: "swift-nio")
+            ],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
-        .testTarget(
-            name: "TDSKitTests",
-            dependencies: ["TDSKit"],
+        .executableTarget(
+            name: "TDSCLI",
+            dependencies: ["SQLServerKit", "TDSKit"],
             swiftSettings: [.swiftLanguageMode(.v5)]
         )
     ]

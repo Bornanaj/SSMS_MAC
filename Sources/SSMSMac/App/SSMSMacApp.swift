@@ -32,10 +32,24 @@ struct SSMSMacApp: App {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        // The self test hides its window, which would otherwise quit the app immediately.
+        !SelfTest.isRequested
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSWindow.allowsAutomaticWindowTabbing = false
+
+        // Headless verification path: exercises the same models the UI binds to.
+        if SelfTest.isRequested {
+            setvbuf(stdout, nil, _IOLBF, 0)
+            NSApp.setActivationPolicy(.accessory)
+            for window in NSApp.windows { window.setFrame(.zero, display: false) }
+            Task { @MainActor in
+                let status = await SelfTest.run()
+                exit(status)
+            }
+        }
     }
 }
 

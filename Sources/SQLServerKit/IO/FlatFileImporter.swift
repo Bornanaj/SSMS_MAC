@@ -170,7 +170,7 @@ public struct FlatFileImporter: Sendable {
 
     // MARK: - File reading
 
-    static func readText(at url: URL) throws -> (text: String, encodingName: String) {
+    public static func readText(at url: URL) throws -> (text: String, encodingName: String) {
         let data = try Data(contentsOf: url)
 
         // Honour a BOM when there is one; otherwise try UTF-8 then fall back to Windows-1252,
@@ -198,7 +198,7 @@ public struct FlatFileImporter: Sendable {
     }
 
     /// Pick the delimiter that yields the most consistent field count across sample lines.
-    static func sniffDelimiter(in text: String) -> String {
+    public static func sniffDelimiter(in text: String) -> String {
         let candidates = [",", ";", "\t", "|"]
         let lines = text.unicodeScalars
             .split(separator: "\n", maxSplits: 20, omittingEmptySubsequences: true)
@@ -225,7 +225,7 @@ public struct FlatFileImporter: Sendable {
     }
 
     /// A first row is a header when it is all non-numeric and the rows below are not.
-    static func looksLikeHeader(_ first: [String], following rows: [[String]]) -> Bool {
+    public static func looksLikeHeader(_ first: [String], following rows: [[String]]) -> Bool {
         guard !first.isEmpty else { return false }
         let firstLooksTextual = first.allSatisfy { field in
             let trimmed = field.trimmingCharacters(in: .whitespaces)
@@ -238,7 +238,7 @@ public struct FlatFileImporter: Sendable {
         return sample.count == first.count
     }
 
-    static func sanitiseColumnName(_ name: String) -> String {
+    public static func sanitiseColumnName(_ name: String) -> String {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "Column" }
         let cleaned = trimmed.map { character -> Character in
@@ -251,7 +251,7 @@ public struct FlatFileImporter: Sendable {
 
     // MARK: - Type inference
 
-    static func inferType(_ samples: [String]) -> (type: String, nullable: Bool) {
+    public static func inferType(_ samples: [String]) -> (type: String, nullable: Bool) {
         let values = samples.map { $0.trimmingCharacters(in: .whitespaces) }
         let nonEmpty = values.filter { !$0.isEmpty && $0.uppercased() != "NULL" }
         let nullable = nonEmpty.count != values.count
@@ -325,7 +325,7 @@ public struct FlatFileImporter: Sendable {
     }
 
     /// Build the T-SQL literal for one field, letting the server do the final conversion.
-    static func literal(_ raw: String, sqlType: String, nullable: Bool) -> String {
+    public static func literal(_ raw: String, sqlType: String, nullable: Bool) -> String {
         let value = raw.trimmingCharacters(in: .whitespaces)
         if value.isEmpty || value.uppercased() == "NULL" {
             return nullable ? "NULL" : "''"
@@ -350,10 +350,10 @@ public struct FlatFileImporter: Sendable {
 /// It walks unicode scalars rather than `Character`s on purpose: Swift treats CRLF as a
 /// single grapheme cluster, so a Character-based scan silently fails to split rows in
 /// files written with Windows line endings.
-enum CSVParser {
+public enum CSVParser {
 
     /// `limit` of 0 means "read every row".
-    static func parse(_ text: String, delimiter: Character, limit: Int) -> [[String]] {
+    public static func parse(_ text: String, delimiter: Character, limit: Int) -> [[String]] {
         let separator = delimiter.unicodeScalars.first ?? ","
         let quote: Unicode.Scalar = "\""
         let carriageReturn: Unicode.Scalar = "\r"

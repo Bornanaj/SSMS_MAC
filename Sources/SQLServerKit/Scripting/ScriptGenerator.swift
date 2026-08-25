@@ -423,7 +423,7 @@ public struct ScriptGenerator: Sendable {
 
     /// Turn `CREATE PROCEDURE` / `CREATE OR ALTER PROCEDURE` into `ALTER PROCEDURE`,
     /// skipping any leading whitespace and comments the author left in place.
-    static func rewriteLeadingCreate(_ definition: String, to keyword: String) -> String {
+    public static func rewriteLeadingCreate(_ definition: String, to keyword: String) -> String {
         let lexer = TSQLLexer()
         for token in lexer.tokenize(definition) {
             switch token.kind {
@@ -850,7 +850,7 @@ public struct ScriptGenerator: Sendable {
     // MARK: - Formatting helpers
 
     /// Render a catalog row's type metadata the way it appears in a CREATE statement.
-    static func formatType(name: String, baseName: String, maxLength: Int,
+    public static func formatType(name: String, baseName: String, maxLength: Int,
                            precision: Int, scale: Int, isUserDefined: Bool) -> String {
         if isUserDefined { return SQLIdentifier.quote(name) }
         let lowered = name.lowercased()
