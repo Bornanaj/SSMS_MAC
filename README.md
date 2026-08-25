@@ -34,8 +34,19 @@ or JVM to install** — the TDS 7.4 protocol is implemented in Swift inside this
 open "build/SSMS for Mac.app"
 ```
 
-`Scripts/build-app.sh` compiles with SwiftPM and assembles the `.app` bundle by hand,
-so no Xcode project is involved.
+`Scripts/build-app.sh` compiles with SwiftPM, generates the icon and assembles the `.app`
+bundle by hand, so no Xcode project is involved.
+
+To produce an installer disk image instead:
+
+```bash
+./Scripts/make-dmg.sh release      # -> build/SSMS-for-Mac-1.0.0.dmg
+```
+
+The build is signed ad hoc rather than with an Apple Developer ID, so the first launch
+needs **right-click → Open** once. macOS remembers the choice afterwards. If a copy picks
+up the quarantine flag along the way, clear it with
+`xattr -dr com.apple.quarantine "/Applications/SSMS for Mac.app"`.
 
 ## Features
 
