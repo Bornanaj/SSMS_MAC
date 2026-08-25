@@ -202,5 +202,159 @@ func runSQLServerKitTests(_ t: TestRunner) -> Int32 {
         t.equal(TDSValue.int(-42).sqlLiteral, "-42", "int literal")
     }
 
+    t.suite("completion matching") {
+        func rank(_ candidate: String, _ query: String) -> Int? {
+            CompletionMatcher.match(candidate: candidate, query: query)?.rank
+        }
+
+        t.expect(rank("Customers", "Customers") != nil, "exact match")
+        t.expect(rank("Customers", "cust") != nil, "case-insensitive prefix")
+        t.expect(rank("OrderSummary", "os") != nil, "CamelCase acronym")
+        t.expect(rank("sys_databases", "sd") != nil, "underscore acronym")
+        t.expect(rank("OrderSummary", "sum") != nil, "second word prefix")
+        t.expect(rank("OrderSummary", "rder") != nil, "substring")
+        t.expect(rank("Customers", "xyz") == nil, "no match returns nil")
+        t.expect(rank("abc", "abcd") == nil, "query longer than candidate")
+
+        // Ordering is the whole point: better kinds of match must rank lower.
+        let exact = rank("id", "id") ?? .max
+        let prefix = rank("identity", "id") ?? .max
+        let acronym = rank("ItemDetail", "id") ?? .max
+        let substring = rank("void", "id") ?? .max
+        t.expect(exact < prefix, "exact beats prefix", "\(exact) vs \(prefix)")
+        t.expect(prefix < acronym, "prefix beats acronym", "\(prefix) vs \(acronym)")
+        t.expect(acronym < substring, "acronym beats substring", "\(acronym) vs \(substring)")
+
+        // Shorter candidates win among equally good prefix matches.
+        let shortName = rank("Order", "or") ?? .max
+        let longName = rank("OrderDetailLine", "or") ?? .max
+        t.expect(shortName < longName, "shorter prefix match ranks first")
+
+        let positions = CompletionMatcher.match(candidate: "OrderSummary", query: "os")?.positions
+        t.equal(positions ?? [], [0, 5], "acronym highlights the word initials")
+
+        let boundaries = CompletionMatcher.wordBoundaries(Array("OrderSummary_2"))
+        t.expect(boundaries.contains(0) && boundaries.contains(5) && boundaries.contains(13),
+                 "word boundaries at camel humps and after underscores",
+                 "\(boundaries)")
+    }
+
+    t.suite("alias generation") {
+        t.equal(SQLAssist.suggestedAlias(for: "Customers", existing: []), "c", "single word")
+        t.equal(SQLAssist.suggestedAlias(for: "OrderDetails", existing: []), "od", "camel case")
+        t.equal(SQLAssist.suggestedAlias(for: "sys_databases", existing: []), "sd", "underscored")
+        t.equal(SQLAssist.suggestedAlias(for: "Customers", existing: ["c"]), "c2",
+                "collision gets a suffix")
+        t.equal(SQLAssist.suggestedAlias(for: "Customers", existing: ["c", "c2"]), "c3",
+                "second collision")
+        t.equal(SQLAssist.suggestedAlias(for: "[Order Details]", existing: []), "od",
+                "brackets are stripped")
+    }
+
+    t.suite("wildcard expansion") {
+        let columns = [
+            IntelliSenseColumn(name: "CustomerId", typeName: "int", isNullable: false,
+                               isPrimaryKey: true, ordinal: 1),
+            IntelliSenseColumn(name: "FullName", typeName: "nvarchar(120)", isNullable: false,
+                               isPrimaryKey: false, ordinal: 2),
+            IntelliSenseColumn(name: "Order Total", typeName: "money", isNullable: true,
+                               isPrimaryKey: false, ordinal: 3)
+        ]
+        let orders = [
+            IntelliSenseColumn(name: "OrderId", typeName: "int", isNullable: false,
+                               isPrimaryKey: true, ordinal: 1),
+            IntelliSenseColumn(name: "CustomerId", typeName: "int", isNullable: false,
+                               isPrimaryKey: false, ordinal: 2)
+        ]
+        let catalog = IntelliSenseCatalog(
+            database: "Demo", fetchedAt: Date(), schemas: ["dbo"],
+            tables: [
+                IntelliSenseObject(schema: "dbo", name: "Customers", kind: "table",
+                                   columns: columns),
+                IntelliSenseObject(schema: "dbo", name: "Orders", kind: "table",
+                                   columns: orders)
+            ],
+            routines: [])
+
+        let single = "SELECT * FROM dbo.Customers"
+        let expandedSingle = SQLAssist.expandWildcards(script: single, offset: 8, catalog: catalog)
+        t.expect(expandedSingle?.text.contains("CustomerId, FullName, [Order Total]") == true,
+                 "single table expands and quotes where needed",
+                 expandedSingle?.text ?? "nil")
+
+        let joined = "SELECT * FROM dbo.Customers c JOIN dbo.Orders o ON o.CustomerId = c.CustomerId"
+        let expandedJoin = SQLAssist.expandWildcards(script: joined, offset: 8, catalog: catalog)
+        t.expect(expandedJoin?.text.contains("c.CustomerId") == true,
+                 "multiple sources qualify by alias", expandedJoin?.text ?? "nil")
+        t.expect(expandedJoin?.text.contains("o.OrderId") == true,
+                 "both sources contribute columns")
+
+        let qualified = "SELECT c.* FROM dbo.Customers c JOIN dbo.Orders o ON o.CustomerId = c.CustomerId"
+        let expandedQualified = SQLAssist.expandWildcards(script: qualified, offset: 10,
+                                                          catalog: catalog)
+        t.expect(expandedQualified?.text.contains("o.OrderId") == false,
+                 "alias.* expands only that table", expandedQualified?.text ?? "nil")
+
+        let counted = "SELECT COUNT(*) FROM dbo.Customers"
+        t.expect(SQLAssist.expandWildcards(script: counted, offset: 14, catalog: catalog) == nil,
+                 "COUNT(*) is left alone")
+
+        let arithmetic = "SELECT 2 * 3 FROM dbo.Customers"
+        t.expect(SQLAssist.expandWildcards(script: arithmetic, offset: 10, catalog: catalog) == nil,
+                 "multiplication is left alone")
+    }
+
+    t.suite("join conditions") {
+        let relationship = IntelliSenseRelationship(
+            name: "FK_Orders_Customers", parentSchema: "dbo", parentTable: "Orders",
+            parentColumns: ["CustomerId"], referencedSchema: "dbo",
+            referencedTable: "Customers", referencedColumns: ["CustomerId"])
+        let catalog = IntelliSenseCatalog(
+            database: "Demo", fetchedAt: Date(), schemas: ["dbo"],
+            tables: [
+                IntelliSenseObject(schema: "dbo", name: "Customers", kind: "table"),
+                IntelliSenseObject(schema: "dbo", name: "Orders", kind: "table")
+            ],
+            routines: [], relationships: [relationship])
+
+        let script = "SELECT * FROM dbo.Customers c JOIN dbo.Orders o ON "
+        let suggestions = SQLAssist.joinConditions(script: script, offset: script.utf16.count,
+                                                   joining: "Orders", alias: "o",
+                                                   catalog: catalog)
+        t.equal(suggestions.count, 1, "one foreign key found")
+        t.equal(suggestions.first?.condition ?? "", "o.CustomerId = c.CustomerId",
+                "condition uses the aliases in scope")
+
+        t.equal(catalog.relationships(between: "Orders", and: "Customers").count, 1,
+                "relationship lookup is direction agnostic")
+        t.equal(catalog.relationships(between: "Customers", and: "Orders").count, 1,
+                "reverse direction too")
+    }
+
+    t.suite("text results") {
+        let columns = [
+            TDSColumn(index: 0, name: "id", typeInfo: TDSTypeInfo(dataType: .int, length: 4)),
+            TDSColumn(index: 1, name: "name",
+                      typeInfo: TDSTypeInfo(dataType: .nVarChar, length: 100))
+        ]
+        let rows: [[TDSValue]] = [
+            [.int(1), .string("Ada")],
+            [.int(200), .string("برنا")],
+            [.int(3), .null]
+        ]
+        var style = TextResultFormatter.Style()
+        style.nullText = "NULL"
+        let text = TextResultFormatter(style: style).format(columns: columns, rows: rows)
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        t.expect(lines.count >= 5, "header, rule and three rows", "\(lines.count) lines")
+        t.expect(lines[1].allSatisfy { $0 == "-" || $0 == " " },
+                 "second line is the rule", lines.count > 1 ? lines[1] : "")
+        t.expect(text.contains("NULL"), "null renders as the configured text")
+        t.expect(!lines.contains { $0.hasSuffix(" ") }, "no trailing whitespace")
+
+        let affected = TextResultFormatter(style: style).rowsAffected(1)
+        t.expect(affected.contains("(1 row affected)"), "singular row count", affected)
+    }
+
     return t.finish()
 }

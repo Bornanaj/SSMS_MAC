@@ -41,9 +41,9 @@ func drawIcon(size: CGFloat, in context: CGContext) {
     context.addPath(plainPath)
     context.clip()
 
-    // Deep blue to teal, the colours a database tool wants to read as.
-    let colors = [srgb(23, 58, 122).cgColor, srgb(18, 116, 152).cgColor,
-                  srgb(20, 158, 150).cgColor] as CFArray
+    // Deep navy through to cyan: the colour family SQL Server tooling lives in.
+    let colors = [srgb(10, 46, 110).cgColor, srgb(16, 100, 176).cgColor,
+                  srgb(38, 168, 214).cgColor] as CFArray
     if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(),
                                  colors: colors, locations: [0, 0.55, 1]) {
         context.drawLinearGradient(gradient,
@@ -103,27 +103,63 @@ func drawIcon(size: CGFloat, in context: CGContext) {
     context.setStrokeColor(srgb(16, 48, 96).withAlphaComponent(0.35).cgColor)
     context.strokeEllipse(in: topFace)
 
-    // Terminal prompt on the cylinder body, so it reads as a query tool and not
-    // just a generic database. Dropped at small sizes where it would smear.
+    // A wrench across the cylinder: the "management" half of the name, and the cue
+    // that separates a tool from a plain database icon. Dropped below 64pt, where it
+    // would smear into the cylinder.
     if size >= 64 {
-        let promptColor = srgb(18, 116, 152)
-        context.setStrokeColor(promptColor.cgColor)
-        context.setLineWidth(max(2, 26 * scale))
-        context.setLineCap(.round)
-        context.setLineJoin(.round)
+        let headRadius = cylinder.width * 0.26
+        let centre = CGPoint(x: cylinder.maxX - cylinder.width * 0.06,
+                             y: cylinder.minY + cylinder.height * 0.10)
 
-        let chevronHeight = cylinder.height * 0.20
-        let originX = cylinder.minX + cylinder.width * 0.24
-        let originY = cylinder.minY + cylinder.height * 0.34
-        context.move(to: CGPoint(x: originX, y: originY + chevronHeight / 2))
-        context.addLine(to: CGPoint(x: originX + chevronHeight * 0.62, y: originY))
-        context.addLine(to: CGPoint(x: originX, y: originY - chevronHeight / 2))
-        context.strokePath()
+        context.saveGState()
+        context.translateBy(x: centre.x, y: centre.y)
+        context.rotate(by: -.pi / 4)
 
-        let underscoreY = originY - chevronHeight / 2
-        context.move(to: CGPoint(x: originX + chevronHeight * 0.85, y: underscoreY))
-        context.addLine(to: CGPoint(x: cylinder.maxX - cylinder.width * 0.20, y: underscoreY))
-        context.strokePath()
+        let handleWidth = headRadius * 0.62
+        let handleLength = cylinder.width * 0.62
+        let handle = CGRect(x: -handleWidth / 2, y: -handleLength,
+                            width: handleWidth, height: handleLength)
+
+        // Outline first, so the wrench stays readable where it crosses the cylinder.
+        context.setFillColor(srgb(10, 46, 110).withAlphaComponent(0.85).cgColor)
+        let outlineWidth = 14 * scale
+        context.addPath(CGPath(roundedRect: handle.insetBy(dx: -outlineWidth, dy: -outlineWidth),
+                               cornerWidth: handleWidth, cornerHeight: handleWidth,
+                               transform: nil))
+        context.fillEllipse(in: CGRect(x: -headRadius - outlineWidth, y: -headRadius - outlineWidth,
+                                       width: (headRadius + outlineWidth) * 2,
+                                       height: (headRadius + outlineWidth) * 2))
+        context.fillPath()
+
+        context.setFillColor(NSColor.white.cgColor)
+        context.addPath(CGPath(roundedRect: handle, cornerWidth: handleWidth / 2,
+                               cornerHeight: handleWidth / 2, transform: nil))
+        context.fillPath()
+        context.fillEllipse(in: CGRect(x: -headRadius, y: -headRadius,
+                                       width: headRadius * 2, height: headRadius * 2))
+
+        // The bore and the open jaw are cut back out by repainting the plate gradient
+        // through a clip, which keeps the wrench looking cut from the artwork rather
+        // than pasted on top.
+        context.saveGState()
+        let bore = CGRect(x: -headRadius * 0.46, y: -headRadius * 0.46,
+                          width: headRadius * 0.92, height: headRadius * 0.92)
+        let jaw = CGRect(x: -headRadius * 0.40, y: 0,
+                         width: headRadius * 0.80, height: headRadius * 1.4)
+        context.addEllipse(in: bore)
+        context.addRect(jaw)
+        context.clip()
+        context.rotate(by: .pi / 4)
+        context.translateBy(x: -centre.x, y: -centre.y)
+        if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(),
+                                     colors: colors, locations: [0, 0.55, 1]) {
+            context.drawLinearGradient(gradient,
+                                       start: CGPoint(x: plate.minX, y: plate.maxY),
+                                       end: CGPoint(x: plate.maxX, y: plate.minY),
+                                       options: [])
+        }
+        context.restoreGState()
+        context.restoreGState()
     }
 
     context.restoreGState()

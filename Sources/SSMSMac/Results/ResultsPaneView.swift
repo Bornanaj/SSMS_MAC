@@ -10,6 +10,11 @@ struct ResultsPaneView: View {
     var onJumpToLine: (Int) -> Void
 
     @State private var exportTarget: ResultSetModel?
+    @State private var preferences = QueryResultsPreferences.load()
+
+    private var outputMode: QueryOutputMode {
+        settings.resultsOutputMode == "text" ? .text : .grid
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -70,6 +75,19 @@ struct ResultsPaneView: View {
                     .foregroundStyle(.secondary)
             }
 
+            Menu {
+                Picker("Output", selection: $settings.resultsOutputMode) {
+                    Text("Results to Grid").tag("grid")
+                    Text("Results to Text").tag("text")
+                }
+                .pickerStyle(.inline)
+            } label: {
+                Image(systemName: outputMode == .text ? "text.alignleft" : "tablecells")
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("Switch between grid and text output")
+
             Button {
                 tab.showResultsPane = false
             } label: {
@@ -101,6 +119,9 @@ struct ResultsPaneView: View {
     @ViewBuilder
     private var content: some View {
         switch tab.selectedPaneTab {
+        case .results where outputMode == .text:
+            textResults
+
         case .results:
             if tab.resultSets.isEmpty {
                 ContentUnavailableView(tab.isExecuting ? "Running…" : "No results",
@@ -135,6 +156,42 @@ struct ResultsPaneView: View {
         case .clientStatistics:
             clientStatistics
         }
+    }
+
+    /// SSMS's "Results to Text": every result set rendered as fixed-width columns in
+    /// one scrollable document, the way sqlcmd prints them.
+    @ViewBuilder
+    private var textResults: some View {
+        if tab.resultSets.isEmpty && tab.messages.isEmpty {
+            ContentUnavailableView(tab.isExecuting ? "Running…" : "No results",
+                                   systemImage: "text.alignleft",
+                                   description: Text("Execute a query to see output here."))
+        } else {
+            ScrollView([.vertical, .horizontal]) {
+                Text(textOutput)
+                    .font(.system(size: settings.gridFontSize, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(10)
+            }
+            .background(Color(nsColor: .textBackgroundColor))
+        }
+    }
+
+    private var textOutput: String {
+        let formatter = TextResultFormatter(style: preferences.textStyle)
+        var blocks: [String] = []
+        for model in tab.resultSets {
+            blocks.append(formatter.format(columns: model.columns, rows: model.rows))
+            blocks.append(formatter.rowsAffected(Int64(model.rowCount)))
+        }
+        for message in tab.messages where message.kind == .info {
+            blocks.append(message.text)
+        }
+        for message in tab.messages where message.kind == .error {
+            blocks.append(message.displayText)
+        }
+        return blocks.joined(separator: "\n")
     }
 
     @ViewBuilder

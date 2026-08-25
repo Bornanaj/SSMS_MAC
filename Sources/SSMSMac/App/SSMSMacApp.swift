@@ -112,12 +112,37 @@ struct AppCommands: Commands {
 
             Divider()
 
+            Picker("Results To", selection: $settings.resultsOutputMode) {
+                Text("Results to Grid").tag("grid")
+                Text("Results to Text").tag("text")
+            }
+            .pickerStyle(.inline)
+
+            Button("Query Options…") { app.activeSheet = .queryOptions }
+                .disabled(app.selectedTab == nil)
+
+            Divider()
+
             Button("Format Script") {
                 guard let tab = app.selectedTab else { return }
                 tab.text = SQLFormatter(style: SQLFormatter.Style()).format(tab.text)
             }
             .keyboardShortcut("f", modifiers: [.command, .shift])
             .disabled(app.selectedTab == nil)
+
+            Button("Expand Wildcards") {
+                // Routed through the responder chain so it lands on whichever editor
+                // currently has focus.
+                NSApp.sendAction(#selector(SQLTextView.expandWildcards(_:)), to: nil, from: nil)
+            }
+            .keyboardShortcut("e", modifiers: [.command, .option])
+
+            Button("List Members") {
+                NSApp.sendAction(#selector(NSTextView.complete(_:)), to: nil, from: nil)
+            }
+            .keyboardShortcut(.space, modifiers: [.control])
+
+            Divider()
 
             Button("Dump Editor Diagnostics") { EditorDump.request() }
                 .keyboardShortcut("d", modifiers: [.command, .option])
@@ -129,6 +154,18 @@ struct AppCommands: Commands {
         }
 
         CommandMenu("Tools") {
+            Button("Template Explorer…") { app.activeSheet = .templates }
+                .keyboardShortcut("t", modifiers: [.command, .option])
+
+            Button("Specify Template Values…") {
+                guard let tab = app.selectedTab else { return }
+                app.pendingTemplateScript = tab.text
+            }
+            .keyboardShortcut("m", modifiers: [.command, .shift])
+            .disabled(app.selectedTab == nil)
+
+            Divider()
+
             Button("Activity Monitor") {
                 if let server = currentServer { app.activeSheet = .activityMonitor(server.id) }
             }
@@ -147,6 +184,20 @@ struct AppCommands: Commands {
                 if let server = currentServer, let database = app.selectedTab?.database {
                     app.activeSheet = .importFlatFile(server.id, database)
                 }
+            }
+            .disabled(currentServer == nil)
+
+            Button("Generate Scripts…") {
+                if let server = currentServer, let database = app.selectedTab?.database {
+                    app.activeSheet = .generateScripts(server.id, database)
+                }
+            }
+            .disabled(currentServer == nil)
+
+            Divider()
+
+            Button("Attach Database…") {
+                if let server = currentServer { app.activeSheet = .attachDatabase(server.id) }
             }
             .disabled(currentServer == nil)
         }

@@ -54,20 +54,57 @@ public struct IntelliSenseObject: Sendable, Hashable {
     public var qualifiedName: String { "\(schema).\(name)" }
 }
 
+/// A foreign key, so a JOIN can be completed with its own ON condition.
+public struct IntelliSenseRelationship: Sendable, Hashable {
+    public var name: String
+    public var parentSchema: String
+    public var parentTable: String
+    public var parentColumns: [String]
+    public var referencedSchema: String
+    public var referencedTable: String
+    public var referencedColumns: [String]
+
+    public init(name: String, parentSchema: String, parentTable: String,
+                parentColumns: [String], referencedSchema: String,
+                referencedTable: String, referencedColumns: [String]) {
+        self.name = name
+        self.parentSchema = parentSchema
+        self.parentTable = parentTable
+        self.parentColumns = parentColumns
+        self.referencedSchema = referencedSchema
+        self.referencedTable = referencedTable
+        self.referencedColumns = referencedColumns
+    }
+}
+
 public struct IntelliSenseCatalog: Sendable {
     public var database: String
     public var fetchedAt: Date
     public var schemas: [String]
     public var tables: [IntelliSenseObject]
     public var routines: [IntelliSenseObject]
+    public var relationships: [IntelliSenseRelationship]
 
     public init(database: String, fetchedAt: Date, schemas: [String],
-                tables: [IntelliSenseObject], routines: [IntelliSenseObject]) {
+                tables: [IntelliSenseObject], routines: [IntelliSenseObject],
+                relationships: [IntelliSenseRelationship] = []) {
         self.database = database
         self.fetchedAt = fetchedAt
         self.schemas = schemas
         self.tables = tables
         self.routines = routines
+        self.relationships = relationships
+    }
+
+    /// Foreign keys linking the two tables, in either direction.
+    public func relationships(between left: String, and right: String) -> [IntelliSenseRelationship] {
+        let a = IntelliSenseCatalog.unquote(left).lowercased()
+        let b = IntelliSenseCatalog.unquote(right).lowercased()
+        return relationships.filter { relationship in
+            let parent = relationship.parentTable.lowercased()
+            let referenced = relationship.referencedTable.lowercased()
+            return (parent == a && referenced == b) || (parent == b && referenced == a)
+        }
     }
 
     /// Resolve a table reference that may be bare, schema-qualified or bracketed.
@@ -171,19 +208,49 @@ public actor IntelliSenseProvider {
     public func refresh(database: String) async throws -> IntelliSenseCatalog {
         let tables = try await loadTables(database: database)
         let routines = try await loadRoutines(database: database)
+        let relationships = try await loadRelationships(database: database)
         let schemas = Set(tables.map(\.schema)).union(routines.map(\.schema)).sorted()
         let catalog = IntelliSenseCatalog(database: database, fetchedAt: Date(),
-                                          schemas: schemas, tables: tables, routines: routines)
+                                          schemas: schemas, tables: tables, routines: routines,
+                                          relationships: relationships)
         catalogs[database.lowercased()] = catalog
         return catalog
     }
 
     // MARK: Completion
 
+    /// Insert `table AS alias` when completing a table reference, the way SQL Prompt does.
+    public var generatesAliases = true
+
+    public func setGeneratesAliases(_ value: Bool) {
+        generatesAliases = value
+    }
+
     public func completions(script: String, offset: Int, database: String) async -> [CompletionItem] {
         let catalog = catalogs[database.lowercased()]
         let tokens = lexer.tokenize(script)
         let context = IntelliSenseContext.analyse(tokens: tokens, offset: offset)
+
+        // An ON clause with more than one table in scope is asking for the foreign key
+        // that already describes the relationship.
+        if context.isJoinCondition, let catalog, context.sources.count >= 2,
+           let joined = context.sources.last {
+            let suggestions = SQLAssist.joinConditions(
+                script: script, offset: offset,
+                joining: joined.table, alias: joined.alias, catalog: catalog)
+            if !suggestions.isEmpty {
+                let items = suggestions.map { suggestion in
+                    CompletionItem(id: "join:\(suggestion.condition)",
+                                   label: suggestion.condition,
+                                   kind: .snippet,
+                                   detail: suggestion.constraintName,
+                                   documentation: "Foreign key \(suggestion.detail)",
+                                   insertText: suggestion.condition,
+                                   sortPriority: 0)
+                }
+                return items + columnCompletions(context: context, catalog: catalog)
+            }
+        }
 
         switch context.kind {
         case .memberOf(let qualifier):
@@ -201,7 +268,11 @@ public actor IntelliSenseProvider {
             return memberCompletions(qualifier: qualifier, context: context, catalog: catalog)
 
         case .tableReference:
-            return tableCompletions(catalog: catalog) + schemaCompletions(catalog: catalog)
+            let aliases = generatesAliases
+                ? SQLAssist.aliasesInScope(script: script, offset: offset)
+                : []
+            return tableCompletions(catalog: catalog, aliasesInScope: aliases)
+                + schemaCompletions(catalog: catalog)
 
         case .procedureReference:
             return routineCompletions(catalog: catalog, kindFilter: "procedure")
@@ -251,15 +322,24 @@ public actor IntelliSenseProvider {
         return items
     }
 
-    private func tableCompletions(catalog: IntelliSenseCatalog?) -> [CompletionItem] {
+    private func tableCompletions(catalog: IntelliSenseCatalog?,
+                                  aliasesInScope: Set<String> = []) -> [CompletionItem] {
         guard let catalog else { return [] }
         return catalog.tables.map { object in
-            CompletionItem.make(
+            var item = CompletionItem.make(
                 label: object.name,
                 kind: object.kind == "view" ? .view : .table,
                 detail: object.qualifiedName,
-                documentation: "\(object.columns.count) columns",
+                documentation: object.columns.prefix(8)
+                    .map { "\($0.name) \($0.typeName)" }
+                    .joined(separator: "\n")
+                    + (object.columns.count > 8 ? "\n… \(object.columns.count - 8) more" : ""),
                 priority: object.schema.lowercased() == "dbo" ? 100 : 140)
+            if generatesAliases, !aliasesInScope.isEmpty || true {
+                let alias = SQLAssist.suggestedAlias(for: object.name, existing: aliasesInScope)
+                item.insertText += " AS \(alias)"
+            }
+            return item
         }
     }
 
@@ -420,6 +500,50 @@ public actor IntelliSenseProvider {
                                                  isRoutine: true)
     }
 
+    private func loadRelationships(database: String) async throws -> [IntelliSenseRelationship] {
+        let sql = """
+        SELECT fk.name,
+               ps.name AS parent_schema, pt.name AS parent_table,
+               rs.name AS referenced_schema, rt.name AS referenced_table,
+               STUFF((SELECT N',' + pc.name
+                      FROM sys.foreign_key_columns AS fkc2
+                      JOIN sys.columns AS pc ON pc.object_id = fkc2.parent_object_id
+                           AND pc.column_id = fkc2.parent_column_id
+                      WHERE fkc2.constraint_object_id = fk.object_id
+                      ORDER BY fkc2.constraint_column_id
+                      FOR XML PATH(N''), TYPE).value(N'.', N'nvarchar(max)'), 1, 1, N'')
+                  AS parent_columns,
+               STUFF((SELECT N',' + rc.name
+                      FROM sys.foreign_key_columns AS fkc3
+                      JOIN sys.columns AS rc ON rc.object_id = fkc3.referenced_object_id
+                           AND rc.column_id = fkc3.referenced_column_id
+                      WHERE fkc3.constraint_object_id = fk.object_id
+                      ORDER BY fkc3.constraint_column_id
+                      FOR XML PATH(N''), TYPE).value(N'.', N'nvarchar(max)'), 1, 1, N'')
+                  AS referenced_columns
+        FROM sys.foreign_keys AS fk
+        JOIN sys.objects AS pt ON pt.object_id = fk.parent_object_id
+        JOIN sys.schemas AS ps ON ps.schema_id = pt.schema_id
+        JOIN sys.objects AS rt ON rt.object_id = fk.referenced_object_id
+        JOIN sys.schemas AS rs ON rs.schema_id = rt.schema_id
+        """
+        let result = try await session.metadataQuery(sql, database: database)
+        func split(_ value: String) -> [String] {
+            value.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+        }
+        return (result.resultSets.first?.dictionaries() ?? []).map { row in
+            IntelliSenseRelationship(
+                name: row.string("name"),
+                parentSchema: row.string("parent_schema"),
+                parentTable: row.string("parent_table"),
+                parentColumns: split(row.string("parent_columns")),
+                referencedSchema: row.string("referenced_schema"),
+                referencedTable: row.string("referenced_table"),
+                referencedColumns: split(row.string("referenced_columns")))
+        }
+    }
+
     private static func groupObjects(_ rows: [[String: TDSValue]],
                                      isRoutine: Bool) -> [IntelliSenseObject] {
         var objects: [String: IntelliSenseObject] = [:]
@@ -489,6 +613,8 @@ struct IntelliSenseContext {
     var variables: [String] = []
     /// True when the statement is an EXEC, so only routines make sense.
     var prefersRoutines = false
+    /// True when the caret sits in a JOIN ... ON clause.
+    var isJoinCondition = false
 
     static func analyse(tokens: [TSQLToken], offset: Int) -> IntelliSenseContext {
         var context = IntelliSenseContext()
@@ -547,6 +673,9 @@ struct IntelliSenseContext {
         }
 
         let upper = anchor.text.uppercased()
+        if upper == "ON" || (upper == "AND" && anchorIsInsideOnClause(significant, anchorIndex)) {
+            context.isJoinCondition = true
+        }
         switch upper {
         case "FROM", "JOIN", "INTO", "UPDATE", "TABLE", "APPLY":
             context.kind = .tableReference
@@ -559,6 +688,20 @@ struct IntelliSenseContext {
             context.kind = .general
         }
         return context
+    }
+
+    /// Walk back from an AND to see whether it continues an ON clause rather than a WHERE.
+    private static func anchorIsInsideOnClause(_ tokens: [TSQLToken], _ index: Int) -> Bool {
+        var cursor = index - 1
+        while cursor >= 0 {
+            let upper = tokens[cursor].text.uppercased()
+            if upper == "ON" { return true }
+            if ["WHERE", "SELECT", "FROM", "GROUP", "ORDER", "HAVING"].contains(upper) {
+                return false
+            }
+            cursor -= 1
+        }
+        return false
     }
 
     /// Bound the search to the statement around the caret so aliases from an earlier

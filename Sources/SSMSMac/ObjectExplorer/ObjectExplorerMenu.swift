@@ -49,7 +49,34 @@ struct ObjectExplorerMenu: View {
             scriptItem("CREATE To", .create)
             scriptItem("DROP To", .drop)
         }
+        Button("Generate Scripts…") {
+            if let server = app.server(for: node), let name = node.name {
+                app.activeSheet = .generateScripts(server.id, name)
+            }
+        }
         Menu("Tasks") {
+            Button("Detach…") {
+                if let server = app.server(for: node), let name = node.name {
+                    app.activeSheet = .detachDatabase(server.id, name)
+                }
+            }
+            Button("Attach…") {
+                if let server = app.server(for: node) {
+                    app.activeSheet = .attachDatabase(server.id)
+                }
+            }
+            Divider()
+            Button("Shrink…") {
+                if let server = app.server(for: node), let name = node.name {
+                    app.activeSheet = .shrinkDatabase(server.id, name)
+                }
+            }
+            Button("Disk Usage…") {
+                if let server = app.server(for: node), let name = node.name {
+                    app.activeSheet = .diskUsage(server.id, name)
+                }
+            }
+            Divider()
             Button("Back Up…") {
                 if let server = app.server(for: node), let name = node.name {
                     app.activeSheet = .backup(server.id, name)
@@ -92,6 +119,14 @@ struct ObjectExplorerMenu: View {
             }
         }
         Divider()
+        Button("Design") {
+            if let server = app.server(for: node), let database = node.database,
+               let schema = node.schema, let name = node.name {
+                app.activeSheet = .designTable(server.id, database, schema, name)
+            }
+        }
+        dependenciesItem
+        Divider()
         Menu("Script Table as") {
             scriptItem("CREATE To", .create)
             scriptItem("DROP To", .drop)
@@ -118,6 +153,7 @@ struct ObjectExplorerMenu: View {
         Button("Select Top 1000 Rows") {
             Task { await ObjectExplorerActions.selectTopRows(node: node, app: app) }
         }
+        dependenciesItem
         Divider()
         Menu("Script View as") {
             scriptItem("CREATE To", .create)
@@ -134,6 +170,7 @@ struct ObjectExplorerMenu: View {
     private var procedureMenu: some View {
         Button("Modify") { script(.alter) }
         Button("Execute Stored Procedure…") { script(.execute) }
+        dependenciesItem
         Divider()
         Menu("Script Stored Procedure as") {
             scriptItem("CREATE To", .create)
@@ -148,6 +185,7 @@ struct ObjectExplorerMenu: View {
     @ViewBuilder
     private var functionMenu: some View {
         Button("Modify") { script(.alter) }
+        dependenciesItem
         Divider()
         Menu("Script Function as") {
             scriptItem("CREATE To", .create)
@@ -193,6 +231,16 @@ struct ObjectExplorerMenu: View {
             NSPasteboard.general.setString(node.name ?? node.label, forType: .string)
         }
         refreshItem
+    }
+
+    @ViewBuilder
+    private var dependenciesItem: some View {
+        Button("View Dependencies…") {
+            if let server = app.server(for: node), let database = node.database,
+               let schema = node.schema, let name = node.name {
+                app.activeSheet = .dependencies(server.id, database, schema, name)
+            }
+        }
     }
 
     @ViewBuilder

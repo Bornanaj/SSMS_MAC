@@ -292,22 +292,27 @@ struct SQLEditorView: NSViewRepresentable {
             tab.requestCompletions(at: textView.selectedRange().location)
         }
 
-        func sqlTextView(_ textView: SQLTextView, completionsFor prefix: String,
-                         range: NSRange) -> [CompletionItem] {
+        /// Candidates for the caret's context. Ranking and filtering happen in the
+        /// text view, which owns the query string as the user types.
+        func sqlTextViewCompletionCandidates(_ textView: SQLTextView) -> [CompletionItem] {
             guard settings.intelliSenseEnabled else { return [] }
-            let items = tab.completionItems.isEmpty ? Coordinator.keywordFallback : tab.completionItems
-            guard !prefix.isEmpty else { return Array(items.prefix(200)) }
+            return tab.completionItems.isEmpty ? Coordinator.keywordFallback : tab.completionItems
+        }
 
-            let lowered = prefix.lowercased()
-            let scored = items.compactMap { item -> (CompletionItem, Int)? in
-                let label = item.label.lowercased()
-                if label.hasPrefix(lowered) { return (item, item.sortPriority) }
-                if label.contains(lowered) { return (item, item.sortPriority + 1000) }
-                return nil
+        func sqlTextViewDidRequestExpandWildcards(_ textView: SQLTextView) {
+            Task { @MainActor in
+                guard let expansion = await tab.expandWildcards(at: textView.selectedRange().location)
+                else { return }
+                let range = NSRange(location: 0, length: (textView.string as NSString).length)
+                guard textView.shouldChangeText(in: range, replacementString: expansion.text) else {
+                    return
+                }
+                textView.textStorage?.replaceCharacters(in: range, with: expansion.text)
+                textView.didChangeText()
+                let limit = (expansion.text as NSString).length
+                textView.setSelectedRange(NSRange(location: min(expansion.caret, limit), length: 0))
+                self.highlightAll()
             }
-            return scored.sorted { lhs, rhs in
-                lhs.1 == rhs.1 ? lhs.0.label < rhs.0.label : lhs.1 < rhs.1
-            }.map(\.0).prefix(200).map { $0 }
         }
 
         /// Used before the server catalog has loaded, so completion is never dead.

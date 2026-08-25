@@ -181,6 +181,24 @@ final class QueryTab: ObservableObject, Identifiable {
         }
     }
 
+    /// Expand `SELECT *` into the real column list, using the IntelliSense catalog.
+    func expandWildcards(at offset: Int) async -> SQLAssist.Expansion? {
+        guard let intelliSense, let catalog = await intelliSense.catalog(for: database) else {
+            statusText = "IntelliSense is still loading the catalog for \(database)."
+            return nil
+        }
+        guard let expansion = SQLAssist.expandWildcards(script: text, offset: offset,
+                                                        catalog: catalog) else {
+            statusText = "No wildcard to expand at the cursor."
+            return nil
+        }
+        text = expansion.text
+        statusText = expansion.expandedCount == 1
+            ? "Expanded 1 wildcard."
+            : "Expanded \(expansion.expandedCount) wildcards."
+        return expansion
+    }
+
     func signatureHelp(at offset: Int) async -> String? {
         guard let intelliSense else { return nil }
         return await intelliSense.signatureHelp(script: text, offset: offset, database: database)

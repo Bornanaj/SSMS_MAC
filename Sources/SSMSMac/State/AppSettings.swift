@@ -22,6 +22,8 @@ final class AppSettings: ObservableObject {
     @AppStorage("gridNullText") var gridNullText: String = "NULL"
     @AppStorage("gridMaxRows") var gridMaxRows: Int = 100_000
     @AppStorage("gridMaxCharsPerCell") var gridMaxCharsPerCell: Int = 65535
+    /// "grid" or "text", matching QueryOutputMode.
+    @AppStorage("resultsOutputMode") var resultsOutputMode: String = "grid"
 
     @AppStorage("executionTimeoutSeconds") var executionTimeoutSeconds: Int = 0
     @AppStorage("showSystemObjects") var showSystemObjects: Bool = false

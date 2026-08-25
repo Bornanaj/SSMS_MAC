@@ -5,7 +5,9 @@ protocol SQLTextViewDelegate: AnyObject {
     func sqlTextViewDidRequestExecute(_ textView: SQLTextView)
     func sqlTextViewDidRequestExecuteSelection(_ textView: SQLTextView)
     func sqlTextViewDidRequestCancel(_ textView: SQLTextView)
-    func sqlTextView(_ textView: SQLTextView, completionsFor prefix: String, range: NSRange) -> [CompletionItem]
+    /// Candidates for the caret's context, unfiltered. The text view ranks them.
+    func sqlTextViewCompletionCandidates(_ textView: SQLTextView) -> [CompletionItem]
+    func sqlTextViewDidRequestExpandWildcards(_ textView: SQLTextView)
     func sqlTextViewDidChangeCaret(_ textView: SQLTextView)
 }
 
@@ -18,8 +20,8 @@ final class SQLTextView: NSTextView {
     var highlightCurrentLine = true
     var palette: Theme.SyntaxPalette = Theme.light
 
-    private var lastCompletionItems: [CompletionItem] = []
     private var completionTimer: Timer?
+    let completionPanel = CompletionPanelController()
 
     /// Raised when the view lands in a window or the system switches light/dark, so
     /// the coordinator can re-resolve the palette against a real appearance.
@@ -54,6 +56,27 @@ final class SQLTextView: NSTextView {
     override func keyDown(with event: NSEvent) {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
 
+        // While the list is up it owns the navigation keys, and nothing else.
+        if completionPanel.isVisible, flags.isEmpty || flags == [.shift] {
+            switch event.keyCode {
+            case 126: completionPanel.moveSelection(by: -1); return          // up
+            case 125: completionPanel.moveSelection(by: 1); return           // down
+            case 116: completionPanel.moveSelection(by: -8); return          // page up
+            case 121: completionPanel.moveSelection(by: 8); return           // page down
+            case 36, 76:                                                     // return, enter
+                commitCompletion()
+                return
+            case 48:                                                         // tab
+                commitCompletion()
+                return
+            case 53:                                                         // escape
+                completionPanel.hide()
+                return
+            default:
+                break
+            }
+        }
+
         // F5 executes; Cmd+. cancels, matching the SSMS bindings people have in muscle memory.
         if event.keyCode == 96 { // F5
             if flags.contains(.shift) {
@@ -84,7 +107,7 @@ final class SQLTextView: NSTextView {
             return
         }
         if flags == [.control], event.charactersIgnoringModifiers == " " {
-            complete(nil)
+            showCompletions(force: true)
             return
         }
 
@@ -99,32 +122,46 @@ final class SQLTextView: NSTextView {
     }
 
     private func scheduleCompletionIfNeeded(after event: NSEvent) {
-        guard let characters = event.charactersIgnoringModifiers, let scalar = characters.unicodeScalars.first
-        else { return }
+        guard let characters = event.charactersIgnoringModifiers,
+              let scalar = characters.unicodeScalars.first else { return }
         let isWordCharacter = CharacterSet.letters.contains(scalar) || scalar == "_"
         let isDot = scalar == "."
-        guard isWordCharacter || isDot else { return }
+
+        guard isWordCharacter || isDot else {
+            // Anything else ends the current word, so the list has nothing left to filter.
+            completionTimer?.invalidate()
+            completionPanel.hide()
+            return
+        }
+
+        if completionPanel.isVisible {
+            // Already open: refilter immediately rather than waiting out the delay.
+            showCompletions(force: false)
+            return
+        }
 
         // A single character matches almost everything, so the popup would flash on
         // every keystroke without earning its place.
         if !isDot && rangeForUserCompletion.length < 2 { return }
 
         completionTimer?.invalidate()
-        completionTimer = Timer.scheduledTimer(withTimeInterval: isDot ? 0.08 : 0.30,
+        completionTimer = Timer.scheduledTimer(withTimeInterval: isDot ? 0.05 : 0.20,
                                                repeats: false) { [weak self] _ in
-            guard let self, self.window?.firstResponder === self else { return }
-            self.complete(nil)
+            MainActor.assumeIsolated {
+                guard let self, self.window?.firstResponder === self else { return }
+                self.showCompletions(force: false)
+            }
         }
     }
 
     // MARK: - Completion
 
     /// AppKit binds Escape to `complete:`, so the key that should dismiss the
-    /// completion list is the one that summons it — and whatever was highlighted then
-    /// gets committed by the next keystroke. In a SQL editor Escape only ever cancels.
+    /// completion list is the one that summons it. Escape only ever cancels here.
     override func cancelOperation(_ sender: Any?) {
         completionTimer?.invalidate()
         completionTimer = nil
+        completionPanel.hide()
     }
 
     override var rangeForUserCompletion: NSRange {
@@ -142,31 +179,77 @@ final class SQLTextView: NSTextView {
         return NSRange(location: start, length: caret - start)
     }
 
-    override func completions(forPartialWordRange charRange: NSRange,
-                              indexOfSelectedItem index: UnsafeMutablePointer<Int>?) -> [String]? {
-        let prefix = (string as NSString).substring(with: charRange)
-        let items = sqlDelegate?.sqlTextView(self, completionsFor: prefix, range: charRange) ?? []
-        lastCompletionItems = items
-        // Deliberately leave nothing preselected. With a highlighted row, any key that
-        // ends the session — including a command shortcut such as Execute — commits it,
-        // so a query gains a stray keyword just as it is about to run. Arrow keys pick a
-        // candidate, and only then does Return or Tab insert it.
-        index?.pointee = -1
-        return items.isEmpty ? nil : items.map(\.label)
+    /// The built-in completion UI is never used: it is a plain list that previews its
+    /// selection straight into the buffer. Everything goes through CompletionPanelController.
+    override func complete(_ sender: Any?) {
+        showCompletions(force: true)
     }
 
-    override func insertCompletion(_ word: String, forPartialWordRange charRange: NSRange,
-                                   movement: Int, isFinal flag: Bool) {
-        // NSTextView previews the highlighted match by inserting it into the buffer as
-        // selected text. That reads as the editor typing on its own, and a following
-        // delimiter commits whatever happened to be highlighted, so only a deliberate
-        // choice is allowed through.
-        guard flag else { return }
-        guard movement != NSTextMovement.cancel.rawValue else { return }
-        // Insert the bracket-quoted form when the identifier needs quoting.
-        let replacement = lastCompletionItems.first { $0.label == word }?.insertText ?? word
-        super.insertCompletion(replacement, forPartialWordRange: charRange,
-                               movement: movement, isFinal: flag)
+    func showCompletions(force: Bool) {
+        guard let delegate = sqlDelegate else { return }
+        let range = rangeForUserCompletion
+        let prefix = (string as NSString).substring(with: range)
+        if !force && prefix.isEmpty && !completionPanel.isVisible {
+            completionPanel.hide()
+            return
+        }
+
+        let candidates = delegate.sqlTextViewCompletionCandidates(self)
+        guard !candidates.isEmpty else {
+            completionPanel.hide()
+            return
+        }
+
+        let ranked = CompletionMatcher.filter(candidates, query: prefix,
+                                              key: { $0.label },
+                                              basePriority: { $0.sortPriority })
+        let entries = ranked.prefix(300).map {
+            CompletionEntry(item: $0.item, positions: $0.match.positions)
+        }
+        guard !entries.isEmpty else {
+            completionPanel.hide()
+            return
+        }
+
+        completionPanel.onChoose = { [weak self] _ in self?.commitCompletion() }
+        completionPanel.show(entries: Array(entries), below: caretRect(), in: self)
+    }
+
+    func commitCompletion() {
+        guard let item = completionPanel.selectedItem else {
+            completionPanel.hide()
+            return
+        }
+        completionPanel.hide()
+        let range = rangeForUserCompletion
+        guard shouldChangeText(in: range, replacementString: item.insertText) else { return }
+        textStorage?.replaceCharacters(in: range, with: item.insertText)
+        didChangeText()
+        let caret = range.location + (item.insertText as NSString).length
+        setSelectedRange(NSRange(location: caret, length: 0))
+    }
+
+    /// Screen-space rectangle of the caret, used to place the list under it.
+    private func caretRect() -> NSRect {
+        guard let layoutManager, let container = textContainer else { return .zero }
+        let range = rangeForUserCompletion
+        let glyphRange = layoutManager.glyphRange(
+            forCharacterRange: NSRange(location: range.location, length: 0),
+            actualCharacterRange: nil)
+        var rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: container)
+        rect.origin.x += textContainerInset.width
+        rect.origin.y += textContainerInset.height
+        if rect.width < 1 { rect.size.width = 1 }
+        return rect
+    }
+
+    @objc func expandWildcards(_ sender: Any?) {
+        sqlDelegate?.sqlTextViewDidRequestExpandWildcards(self)
+    }
+
+    override func resignFirstResponder() -> Bool {
+        completionPanel.hide()
+        return super.resignFirstResponder()
     }
 
     // MARK: - Indentation and comments

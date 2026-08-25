@@ -38,6 +38,8 @@ final class AppState: ObservableObject {
     @Published var showObjectExplorer = true
     @Published var activeSheet: AppSheet?
     @Published var statusMessage: String = "Ready"
+    /// Set to the current script when the user asks to fill in template placeholders.
+    @Published var pendingTemplateScript: String?
 
     let explorer = ObjectExplorerModel()
     let connections = ConnectionStore()
@@ -58,6 +60,15 @@ final class AppState: ObservableObject {
         case editData(UUID, String, String, String)
         case scriptPreview(String, String)
         case indexMaintenance(UUID, String)
+        case generateScripts(UUID, String)
+        case dependencies(UUID, String, String, String)
+        case designTable(UUID, String, String, String)
+        case detachDatabase(UUID, String)
+        case attachDatabase(UUID)
+        case shrinkDatabase(UUID, String)
+        case diskUsage(UUID, String)
+        case queryOptions
+        case templates
 
         var id: String {
             switch self {
@@ -72,6 +83,15 @@ final class AppState: ObservableObject {
             case .editData(let s, let d, let sc, let t): return "edit-\(s)-\(d)-\(sc)-\(t)"
             case .scriptPreview(let title, _): return "script-\(title)"
             case .indexMaintenance(let s, let d): return "indexes-\(s)-\(d)"
+            case .generateScripts(let s, let d): return "genscripts-\(s)-\(d)"
+            case .dependencies(let s, let d, let sc, let n): return "deps-\(s)-\(d)-\(sc)-\(n)"
+            case .designTable(let s, let d, let sc, let t): return "design-\(s)-\(d)-\(sc)-\(t)"
+            case .detachDatabase(let s, let d): return "detach-\(s)-\(d)"
+            case .attachDatabase(let s): return "attach-\(s)"
+            case .shrinkDatabase(let s, let d): return "shrink-\(s)-\(d)"
+            case .diskUsage(let s, let d): return "diskusage-\(s)-\(d)"
+            case .queryOptions: return "queryoptions"
+            case .templates: return "templates"
             }
         }
     }

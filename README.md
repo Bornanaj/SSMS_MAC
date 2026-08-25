@@ -110,14 +110,25 @@ swift build -c release          # libraries and executables
 
 **Results**
 - Virtualised grid backed by `NSTableView`; 100k rows stay responsive
+- Results to Grid or Results to Text, the fixed-width output sqlcmd prints
+- Query Options dialog for the SET flags, isolation level and row limits
 - Multiple result sets, Messages with clickable error lines, client statistics
 - Actual and estimated execution plans with per‑operator cost and missing‑index hints
 - Export to CSV, TSV, JSON, XML, Markdown, HTML, SQL INSERT and XLSX
+
+**Design and scripting**
+- Table Designer: add, drop and alter columns, defaults, identity and primary keys, with
+  the ALTER batch shown before it runs
+- Generate Scripts for a whole database, dependency-ordered, to the clipboard or a file
+- View Dependencies in both directions, from `sys.sql_expression_dependencies`
+- Template Explorer with 30+ ready T-SQL templates and the "Specify Values for Template
+  Parameters" dialog (⇧⌘M)
 
 **Administration**
 - Activity Monitor: processes, blocking, resource waits, expensive queries, file I/O, KILL
 - Database and table properties, index fragmentation with rebuild/reorganize
 - Backup and restore script generation, `RESTORE HEADERONLY` / `FILELISTONLY` inspection
+- Attach, detach, shrink and disk usage, each showing its script first
 - Import Flat File with delimiter sniffing, encoding detection and type inference
 
 ## Data fidelity

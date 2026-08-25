@@ -17,6 +17,15 @@ struct MainWindowView: View {
         .sheet(item: $app.activeSheet) { sheet in
             sheetContent(sheet)
         }
+        .sheet(isPresented: Binding(get: { app.pendingTemplateScript != nil },
+                                    set: { if !$0 { app.pendingTemplateScript = nil } })) {
+            if let script = app.pendingTemplateScript {
+                TemplateParametersSheet(sql: script) { substituted in
+                    app.selectedTab?.text = substituted
+                    app.pendingTemplateScript = nil
+                }
+            }
+        }
         .task {
             if app.servers.isEmpty { app.activeSheet = .connect }
         }
@@ -144,6 +153,53 @@ struct MainWindowView: View {
         case .indexMaintenance(let serverID, let database):
             if let server = app.server(id: serverID) {
                 IndexMaintenanceView(server: server, database: database)
+            }
+        case .generateScripts(let serverID, let database):
+            if let server = app.server(id: serverID) {
+                GenerateScriptsSheet(server: server, database: database)
+            }
+        case .dependencies(let serverID, let database, let schema, let name):
+            if let server = app.server(id: serverID) {
+                DependenciesSheet(server: server, database: database,
+                                  schema: schema, name: name)
+            }
+        case .designTable(let serverID, let database, let schema, let table):
+            if let server = app.server(id: serverID) {
+                TableDesignerSheet(server: server, database: database,
+                                   schema: schema, table: table)
+            }
+        case .detachDatabase(let serverID, let database):
+            if let server = app.server(id: serverID) {
+                DetachDatabaseSheet(server: server, database: database)
+            }
+        case .attachDatabase(let serverID):
+            if let server = app.server(id: serverID) {
+                AttachDatabaseSheet(server: server)
+            }
+        case .shrinkDatabase(let serverID, let database):
+            if let server = app.server(id: serverID) {
+                ShrinkDatabaseSheet(server: server, database: database)
+            }
+        case .diskUsage(let serverID, let database):
+            if let server = app.server(id: serverID) {
+                DiskUsageSheet(server: server, database: database)
+            }
+        case .queryOptions:
+            QueryOptionsSheet(options: app.selectedTab?.setOptions ?? QuerySetOptions()) { updated in
+                app.selectedTab?.setOptions = updated
+            }
+        case .templates:
+            TemplateExplorerView { body in
+                Task {
+                    let server = app.servers.first { $0.id == app.selectedTab?.sessionID }
+                        ?? app.servers.first
+                    if let tab = app.selectedTab {
+                        tab.text = body
+                    } else {
+                        await app.newQueryTab(server: server, database: nil, text: body)
+                    }
+                    app.activeSheet = nil
+                }
             }
         case .scriptPreview(let title, let sql):
             ScriptPreviewSheet(title: title, sql: sql)
