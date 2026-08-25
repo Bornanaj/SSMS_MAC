@@ -100,6 +100,35 @@ WCAG contrast between every attribute run and the background, plus the container
 geometry and glyph counts. Invisible text is not something a compiler or a unit test on
 the model layer can catch, so the check runs in CI.
 
+## A custom NSRulerView stops the editor compositing
+
+The line-number gutter began life as an `NSRulerView`, and the editor drew nothing at
+all: no text, and not even its own background colour. Everything that can be measured
+said the view was fine — 51 glyphs laid out, a used rect of the right size, correct
+foreground and background colours, `isHidden` false, `alphaValue` 1, a non-empty
+`visibleRect`, a layer with contents — and `cacheDisplay(in:to:)` rendered the text
+correctly into an offscreen bitmap.
+
+The give-away was in the scroll view's geometry:
+
+```
+clipView.frame   {{0, 0}, {692, 340}}     <- full width, not inset for the ruler
+clipView.bounds  {{-46, 0}, {692, 340}}   <- shifted by the rule thickness instead
+scroll.visibleRect {{-308, 0}, {1000, 340}}   <- wider than the view's own bounds
+```
+
+`NSScrollView.tile()` is supposed to inset the clip view's *frame* to make room for a
+ruler. With a custom ruler inside SwiftUI's `AppKitPlatformViewHost` it shifted the
+*bounds* instead, and the document view stopped compositing even though every property
+still reported a healthy view.
+
+The gutter is now an ordinary sibling view laid out next to the scroll view by
+`EditorContainerView`, and the scroll view keeps `rulersVisible = false`. Owning the
+layout is a few dozen extra lines and removes an entire class of failure.
+
+`--editor-check` asserts the clip view's frame and bounds both start at the origin,
+which is the signature this bug leaves behind.
+
 ## Testing without Xcode
 
 XCTest ships with Xcode, not with the Command Line Tools, so `swift test` is unavailable in

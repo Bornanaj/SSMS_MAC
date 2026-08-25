@@ -105,8 +105,13 @@ final class SQLTextView: NSTextView {
         let isDot = scalar == "."
         guard isWordCharacter || isDot else { return }
 
+        // A single character matches almost everything, so the popup would flash on
+        // every keystroke without earning its place.
+        if !isDot && rangeForUserCompletion.length < 2 { return }
+
         completionTimer?.invalidate()
-        completionTimer = Timer.scheduledTimer(withTimeInterval: isDot ? 0.05 : 0.25, repeats: false) { [weak self] _ in
+        completionTimer = Timer.scheduledTimer(withTimeInterval: isDot ? 0.08 : 0.30,
+                                               repeats: false) { [weak self] _ in
             guard let self, self.window?.firstResponder === self else { return }
             self.complete(nil)
         }
@@ -140,12 +145,15 @@ final class SQLTextView: NSTextView {
 
     override func insertCompletion(_ word: String, forPartialWordRange charRange: NSRange,
                                    movement: Int, isFinal flag: Bool) {
+        // NSTextView previews the highlighted match by inserting it into the buffer as
+        // selected text. That reads as the editor typing on its own, and a following
+        // delimiter commits whatever happened to be highlighted, so only a deliberate
+        // choice is allowed through.
+        guard flag else { return }
+        guard movement != NSTextMovement.cancel.rawValue else { return }
         // Insert the bracket-quoted form when the identifier needs quoting.
-        guard flag, let item = lastCompletionItems.first(where: { $0.label == word }) else {
-            super.insertCompletion(word, forPartialWordRange: charRange, movement: movement, isFinal: flag)
-            return
-        }
-        super.insertCompletion(item.insertText, forPartialWordRange: charRange,
+        let replacement = lastCompletionItems.first { $0.label == word }?.insertText ?? word
+        super.insertCompletion(replacement, forPartialWordRange: charRange,
                                movement: movement, isFinal: flag)
     }
 

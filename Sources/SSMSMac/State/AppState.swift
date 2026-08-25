@@ -92,7 +92,10 @@ final class AppState: ObservableObject {
 
     // MARK: - Connecting
 
-    func connect(profile: ConnectionProfile, password: String?, accessToken: String? = nil) async {
+    /// `persist` is false for the headless self test, which must not leave entries in
+    /// the user's saved connection list.
+    func connect(profile: ConnectionProfile, password: String?, accessToken: String? = nil,
+                 persist: Bool = true) async {
         isConnecting = true
         connectionError = nil
         defer { isConnecting = false }
@@ -104,7 +107,7 @@ final class AppState: ObservableObject {
             let info = await session.serverInfo
             let server = ConnectedServer(session: session, profile: profile, serverInfo: info)
             servers.append(server)
-            connections.save(profile, password: password)
+            if persist { connections.save(profile, password: password) }
             await explorer.addServer(session: session)
             statusMessage = "Connected to \(info.serverName)."
 

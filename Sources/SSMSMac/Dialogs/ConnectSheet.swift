@@ -224,11 +224,15 @@ struct ConnectSheet: View {
     }
 
     private func connect() {
-        // A new server string means a new saved entry rather than overwriting the old one.
+        // Picking a saved connection fills the form, including its display name. If the
+        // server or login is then edited, this is a different connection: it gets its
+        // own entry, and the inherited name is dropped so it cannot be filed under the
+        // label of the connection it was copied from.
         var target = profile
         if let existing = app.connections.profiles.first(where: { $0.id == profile.id }),
            existing.server != profile.server || existing.username != profile.username {
             target.id = UUID()
+            if target.name == existing.name { target.name = "" }
         }
         Task {
             await app.connect(profile: target,

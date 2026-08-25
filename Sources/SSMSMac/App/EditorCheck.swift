@@ -37,12 +37,17 @@ enum EditorCheck {
             let host = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 500))
             host.appearance = NSAppearance(named: appearanceName)
 
-            let scrollView = NSScrollView(frame: host.bounds)
-            host.addSubview(scrollView)
-
+            // SwiftUI hands NSViewRepresentable a zero-sized scroll view and lays it
+            // out afterwards. Building the container at its final size hid a text
+            // container that never recovered from a zero starting width, so the
+            // diagnostic has to reproduce that ordering exactly.
+            let scrollView = NSScrollView()
             let textView = SQLEditorView.makeTextView(wordWrap: false)
             SQLEditorView.install(textView: textView, in: scrollView, wordWrap: false)
             textView.string = sample
+
+            host.addSubview(scrollView)
+            scrollView.frame = host.bounds
 
             host.appearance = NSAppearance(named: appearanceName)
             scrollView.appearance = NSAppearance(named: appearanceName)
@@ -69,6 +74,22 @@ enum EditorCheck {
             let containerSize = container.containerSize
             let usedRect = layoutManager.usedRect(for: container)
             let glyphCount = layoutManager.numberOfGlyphs
+
+            // A TextKit 2 view whose legacy layoutManager has been touched lays out
+            // correctly and composites nothing, so pin the engine explicitly.
+            check("uses TextKit 1", textView.textLayoutManager == nil,
+                  textView.textLayoutManager == nil ? "NSLayoutManager" : "NSTextLayoutManager")
+
+            // A custom NSRulerView leaves the clip view at full width with a negative
+            // bounds origin, and the document view then never composites.
+            if let clip = textView.enclosingScrollView?.contentView {
+                check("clip view origin is sane",
+                      clip.bounds.origin.x == 0 && clip.frame.origin.x == 0,
+                      "frame \(NSStringFromRect(clip.frame)) bounds \(NSStringFromRect(clip.bounds))")
+            }
+            check("no ruler installed",
+                  textView.enclosingScrollView?.rulersVisible == false,
+                  "rulersVisible = \(textView.enclosingScrollView?.rulersVisible ?? false)")
 
             check("container has usable width", containerSize.width > 50,
                   String(format: "%.1f", containerSize.width))

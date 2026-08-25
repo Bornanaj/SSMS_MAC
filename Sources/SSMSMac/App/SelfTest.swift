@@ -37,7 +37,8 @@ enum SelfTest {
         profile.savePassword = false
 
         // 1. Connect
-        await app.connect(profile: profile, password: env("SQL_PASSWORD", "Str0ngP@ssw0rd!"))
+        await app.connect(profile: profile, password: env("SQL_PASSWORD", "Str0ngP@ssw0rd!"),
+                          persist: false)
         check("connect", app.connectionError == nil && app.servers.count == 1,
               app.connectionError ?? app.servers.first?.displayName ?? "")
         guard let server = app.servers.first else {

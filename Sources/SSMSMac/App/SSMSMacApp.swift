@@ -119,6 +119,9 @@ struct AppCommands: Commands {
             .keyboardShortcut("f", modifiers: [.command, .shift])
             .disabled(app.selectedTab == nil)
 
+            Button("Dump Editor Diagnostics") { EditorDump.request() }
+                .keyboardShortcut("d", modifiers: [.command, .option])
+
             Button("Refresh IntelliSense Cache") {
                 app.selectedTab?.refreshIntelliSenseCatalog()
             }

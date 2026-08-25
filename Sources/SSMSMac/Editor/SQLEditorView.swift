@@ -15,10 +15,26 @@ struct SQLEditorView: NSViewRepresentable {
                     onExecute: onExecute, onExecuteSelection: onExecuteSelection, onCancel: onCancel)
     }
 
+    // MARK: - View construction
+
     /// Builds the editor's text view. Shared with the `--editor-check` diagnostic so
     /// the thing under test is the thing that ships.
+    ///
+    /// The TextKit 1 stack is assembled by hand on purpose. `NSTextView(frame:)` opts
+    /// into TextKit 2 on macOS 14+, and the first touch of the legacy `layoutManager`
+    /// property migrates it back mid-flight. The highlighter, the gutter and the
+    /// current-line band all use that property, so pinning the engine up front keeps
+    /// the view from switching engines after it is already on screen.
     static func makeTextView(wordWrap: Bool) -> SQLTextView {
-        let textView = SQLTextView(frame: .zero)
+        let storage = NSTextStorage()
+        let layoutManager = NSLayoutManager()
+        storage.addLayoutManager(layoutManager)
+        let container = NSTextContainer(size: NSSize(width: CGFloat.greatestFiniteMagnitude,
+                                                     height: CGFloat.greatestFiniteMagnitude))
+        container.widthTracksTextView = wordWrap
+        layoutManager.addTextContainer(container)
+
+        let textView = SQLTextView(frame: .zero, textContainer: container)
         textView.isRichText = false
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
@@ -34,22 +50,71 @@ struct SQLEditorView: NSViewRepresentable {
     }
 
     /// Places the text view inside the scroll view and sizes its text container.
+    ///
+    /// `isHorizontallyResizable` (the text view sizes itself to its content),
+    /// `widthTracksTextView` (the container follows the text view) and an autoresizing
+    /// mask of `.width` (the superview sizes the text view) are mutually exclusive.
+    /// Only one of the three may be active for a given wrap mode.
     static func install(textView: SQLTextView, in scrollView: NSScrollView, wordWrap: Bool) {
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = !wordWrap
         scrollView.autohidesScrollers = true
         scrollView.borderType = .noBorder
+        scrollView.drawsBackground = true
+        // The gutter is a sibling view; a custom NSRulerView breaks the scroll view's
+        // tiling badly enough that the document view stops compositing entirely.
+        scrollView.hasVerticalRuler = false
+        scrollView.rulersVisible = false
 
-        textView.autoresizingMask = [.width]
+        let visible = scrollView.contentSize
+        let initial = NSSize(width: max(visible.width, 400), height: max(visible.height, 200))
+        textView.frame = NSRect(origin: .zero, size: initial)
         textView.isVerticallyResizable = true
-        textView.isHorizontallyResizable = !wordWrap
-        textView.minSize = NSSize(width: 0, height: 0)
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
                                   height: CGFloat.greatestFiniteMagnitude)
+
+        guard let container = textView.textContainer else {
+            scrollView.documentView = textView
+            return
+        }
+
+        if wordWrap {
+            textView.isHorizontallyResizable = false
+            textView.autoresizingMask = [.width]
+            container.widthTracksTextView = true
+            container.size = NSSize(width: initial.width, height: CGFloat.greatestFiniteMagnitude)
+        } else {
+            textView.isHorizontallyResizable = true
+            textView.autoresizingMask = []
+            container.widthTracksTextView = false
+            container.size = NSSize(width: CGFloat.greatestFiniteMagnitude,
+                                    height: CGFloat.greatestFiniteMagnitude)
+        }
+        container.heightTracksTextView = false
+
+        // Keeps the editor filling the pane when the document is shorter or narrower
+        // than the visible area, so clicks in the empty region still land in the text.
+        textView.minSize = initial
         scrollView.documentView = textView
     }
 
-    func makeNSView(context: Context) -> NSScrollView {
+    /// Re-applies the sizes that depend on the visible area, which SwiftUI only
+    /// establishes after the representable has been created.
+    static func updateGeometry(textView: SQLTextView, scrollView: NSScrollView, wordWrap: Bool) {
+        let visible = scrollView.contentSize
+        guard visible.width > 1, visible.height > 1 else { return }
+        textView.minSize = visible
+        if wordWrap {
+            textView.textContainer?.size = NSSize(width: visible.width,
+                                                  height: CGFloat.greatestFiniteMagnitude)
+        }
+        if textView.frame.width < visible.width {
+            textView.setFrameSize(NSSize(width: visible.width,
+                                         height: max(textView.frame.height, visible.height)))
+        }
+    }
+
+    func makeNSView(context: Context) -> EditorContainerView {
         let scrollView = NSScrollView()
         let textView = SQLEditorView.makeTextView(wordWrap: settings.editorWordWrap)
         textView.delegate = context.coordinator
@@ -58,30 +123,54 @@ struct SQLEditorView: NSViewRepresentable {
                               wordWrap: settings.editorWordWrap)
         textView.string = tab.text
 
-        let ruler = LineNumberRulerView(textView: textView)
-        scrollView.verticalRulerView = ruler
-        scrollView.hasVerticalRuler = true
-        scrollView.rulersVisible = settings.editorShowLineNumbers
+        let container = EditorContainerView(scrollView: scrollView)
+        container.gutter.textView = textView
+        container.showsGutter = settings.editorShowLineNumbers
 
-        context.coordinator.textView = textView
-        context.coordinator.ruler = ruler
-        textView.onEffectiveAppearanceChange = { [weak coordinator = context.coordinator] in
+        let coordinator = context.coordinator
+        coordinator.textView = textView
+        coordinator.container = container
+        textView.onEffectiveAppearanceChange = { [weak coordinator] in
             coordinator?.refreshAppearance()
         }
-        context.coordinator.applyAppearance(to: textView, ruler: ruler)
-        context.coordinator.highlightAll()
+        coordinator.applyAppearance(to: textView, gutter: container.gutter)
+        coordinator.highlightAll()
 
         NotificationCenter.default.addObserver(
-            forName: NSView.boundsDidChangeNotification,
-            object: scrollView.contentView,
+            forName: EditorDump.requestNotification,
+            object: nil,
             queue: .main
-        ) { _ in ruler.refresh() }
-        scrollView.contentView.postsBoundsChangedNotifications = true
+        ) { [weak coordinator] _ in
+            MainActor.assumeIsolated {
+                guard let coordinator, let textView = coordinator.textView,
+                      textView.window?.isKeyWindow == true else { return }
+                EditorDump.capture(textView: textView, tabText: coordinator.tab.text,
+                                   label: coordinator.tab.displayTitle)
+            }
+        }
 
-        return scrollView
+        scrollView.contentView.postsBoundsChangedNotifications = true
+        scrollView.contentView.postsFrameChangedNotifications = true
+        for name in [NSView.boundsDidChangeNotification, NSView.frameDidChangeNotification] {
+            NotificationCenter.default.addObserver(
+                forName: name,
+                object: scrollView.contentView,
+                queue: .main
+            ) { [weak container, weak textView] _ in
+                MainActor.assumeIsolated {
+                    guard let container, let textView else { return }
+                    SQLEditorView.updateGeometry(textView: textView,
+                                                 scrollView: container.scrollView,
+                                                 wordWrap: AppSettings.shared.editorWordWrap)
+                    container.refreshGutter()
+                }
+            }
+        }
+
+        return container
     }
 
-    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+    func updateNSView(_ container: EditorContainerView, context: Context) {
         guard let textView = context.coordinator.textView else { return }
         context.coordinator.tab = tab
         context.coordinator.settings = settings
@@ -89,15 +178,19 @@ struct SQLEditorView: NSViewRepresentable {
         if textView.string != tab.text && !context.coordinator.isEditing {
             let selected = textView.selectedRange()
             textView.string = tab.text
-            textView.setSelectedRange(NSRange(location: min(selected.location, tab.text.utf16.count), length: 0))
+            let limit = (tab.text as NSString).length
+            textView.setSelectedRange(NSRange(location: min(selected.location, limit), length: 0))
             context.coordinator.highlightAll()
         }
 
-        scrollView.rulersVisible = settings.editorShowLineNumbers
-        context.coordinator.applyAppearance(to: textView, ruler: context.coordinator.ruler)
-        context.coordinator.ruler?.errorLines = Set(tab.messages
+        container.showsGutter = settings.editorShowLineNumbers
+        SQLEditorView.updateGeometry(textView: textView, scrollView: container.scrollView,
+                                     wordWrap: settings.editorWordWrap)
+        context.coordinator.applyAppearance(to: textView, gutter: container.gutter)
+        container.gutter.errorLines = Set(tab.messages
             .filter { $0.kind == .error && $0.scriptLine > 0 }
             .map(\.scriptLine))
+        container.refreshGutter()
     }
 
     // MARK: - Coordinator
@@ -107,7 +200,7 @@ struct SQLEditorView: NSViewRepresentable {
         var tab: QueryTab
         var settings: AppSettings
         weak var textView: SQLTextView?
-        weak var ruler: LineNumberRulerView?
+        weak var container: EditorContainerView?
         var isEditing = false
 
         private let onExecute: () -> Void
@@ -132,28 +225,31 @@ struct SQLEditorView: NSViewRepresentable {
         /// Re-resolve after the view joins a window or the system theme flips.
         func refreshAppearance() {
             guard let textView else { return }
-            applyAppearance(to: textView, ruler: ruler)
+            applyAppearance(to: textView, gutter: container?.gutter)
         }
 
-        func applyAppearance(to textView: SQLTextView, ruler: LineNumberRulerView?) {
+        func applyAppearance(to textView: SQLTextView, gutter: LineNumberGutterView?) {
             // Ask the text view itself: before it joins a window its enclosing scroll
-            // view still reports the process default, which is how the wrong palette
-            // used to get latched in.
+            // view still reports the process default appearance.
             let isDark = textView.effectiveAppearance
                 .bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
             let font = settings.editorFont
+
+            // These follow preferences rather than appearance, so they are applied on
+            // every pass instead of behind the change guard.
+            textView.highlightCurrentLine = settings.editorHighlightCurrentLine
+            textView.indentWidth = settings.editorTabWidth
+            textView.usesSpacesForTabs = settings.editorUsesSpaces
+
             guard appliedDark != isDark || appliedFont != font else { return }
             appliedDark = isDark
             appliedFont = font
 
             let palette = isDark ? Theme.dark : Theme.light
             textView.applyPalette(palette, font: font)
-            textView.highlightCurrentLine = settings.editorHighlightCurrentLine
-            textView.indentWidth = settings.editorTabWidth
-            textView.usesSpacesForTabs = settings.editorUsesSpaces
-            ruler?.palette = palette
-            ruler?.font = NSFont.monospacedSystemFont(ofSize: max(9, font.pointSize - 2), weight: .regular)
-            ruler?.needsDisplay = true
+            gutter?.palette = palette
+            gutter?.font = NSFont.monospacedSystemFont(ofSize: max(9, font.pointSize - 2),
+                                                       weight: .regular)
             highlighter.update(palette: palette, font: font)
             highlightAll()
         }
@@ -166,7 +262,7 @@ struct SQLEditorView: NSViewRepresentable {
         // MARK: NSTextViewDelegate
 
         func textDidChange(_ notification: Notification) {
-            guard let textView = textView, let storage = textView.textStorage else { return }
+            guard let textView, let storage = textView.textStorage else { return }
             isEditing = true
             defer { isEditing = false }
 
@@ -176,12 +272,13 @@ struct SQLEditorView: NSViewRepresentable {
                 in: edited)
             highlighter.highlight(storage, in: range)
             tab.text = textView.string
-            ruler?.refresh()
+            container?.refreshGutter()
         }
 
         func textViewDidChangeSelection(_ notification: Notification) {
             guard let textView else { return }
             tab.selectedRange = textView.selectedRange()
+            container?.gutter.refresh()
         }
 
         // MARK: SQLTextViewDelegate
