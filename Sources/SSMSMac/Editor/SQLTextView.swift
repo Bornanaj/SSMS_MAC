@@ -21,6 +21,34 @@ final class SQLTextView: NSTextView {
     private var lastCompletionItems: [CompletionItem] = []
     private var completionTimer: Timer?
 
+    /// Raised when the view lands in a window or the system switches light/dark, so
+    /// the coordinator can re-resolve the palette against a real appearance.
+    var onEffectiveAppearanceChange: (() -> Void)?
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        onEffectiveAppearanceChange?()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil { onEffectiveAppearanceChange?() }
+    }
+
+    /// Applies colours to everything the text view draws itself, including the
+    /// attributes newly typed characters inherit.
+    func applyPalette(_ palette: Theme.SyntaxPalette, font: NSFont) {
+        self.palette = palette
+        self.font = font
+        backgroundColor = palette.background
+        textColor = palette.plain
+        insertionPointColor = palette.plain
+        typingAttributes = [.font: font, .foregroundColor: palette.plain]
+        selectedTextAttributes = [
+            .backgroundColor: NSColor.selectedTextBackgroundColor
+        ]
+    }
+
     // MARK: - Key handling
 
     override func keyDown(with event: NSEvent) {

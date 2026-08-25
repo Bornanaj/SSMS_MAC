@@ -79,6 +79,27 @@ Swift's `Character` is a grapheme cluster, and `\r\n` is a single cluster. A CSV
 scans `Array(text)` and compares against `"\n"` silently fails to split rows in any file
 written on Windows — which is most exported CSVs. `CSVParser` walks unicode scalars instead.
 
+## The editor palette must not mix colour systems
+
+`Theme.SyntaxPalette` originally took its background from `NSColor.textBackgroundColor`
+— a dynamic system colour — while every foreground entry was a fixed sRGB value. A
+dynamic colour resolves against whatever appearance is current when it is drawn, so the
+light palette's near-black text could land on a dark background and vanish entirely.
+Contrast 1.0, no error, no crash, just an editor that swallows everything typed into it.
+
+Two changes keep that from recurring:
+
+- Every palette entry is an explicit sRGB colour, so a palette is internally consistent
+  no matter what appearance resolves around it.
+- The appearance is read from the text view itself, not its enclosing scroll view.
+  Before the view joins a window the scroll view still reports the process default, which
+  is how the wrong palette got latched in and then cached behind a change guard.
+
+`ssms-mac --editor-check` renders the editor headlessly in both appearances and asserts
+WCAG contrast between every attribute run and the background, plus the container
+geometry and glyph counts. Invisible text is not something a compiler or a unit test on
+the model layer can catch, so the check runs in CI.
+
 ## Testing without Xcode
 
 XCTest ships with Xcode, not with the Command Line Tools, so `swift test` is unavailable in

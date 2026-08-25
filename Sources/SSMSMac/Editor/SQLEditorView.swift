@@ -15,13 +15,9 @@ struct SQLEditorView: NSViewRepresentable {
                     onExecute: onExecute, onExecuteSelection: onExecuteSelection, onCancel: onCancel)
     }
 
-    func makeNSView(context: Context) -> NSScrollView {
-        let scrollView = NSScrollView()
-        scrollView.hasVerticalScroller = true
-        scrollView.hasHorizontalScroller = !settings.editorWordWrap
-        scrollView.autohidesScrollers = true
-        scrollView.borderType = .noBorder
-
+    /// Builds the editor's text view. Shared with the `--editor-check` diagnostic so
+    /// the thing under test is the thing that ships.
+    static func makeTextView(wordWrap: Bool) -> SQLTextView {
         let textView = SQLTextView(frame: .zero)
         textView.isRichText = false
         textView.isAutomaticQuoteSubstitutionEnabled = false
@@ -33,18 +29,34 @@ struct SQLEditorView: NSViewRepresentable {
         textView.allowsUndo = true
         textView.usesFindBar = true
         textView.isIncrementalSearchingEnabled = true
-        textView.delegate = context.coordinator
-        textView.sqlDelegate = context.coordinator
         textView.textContainerInset = NSSize(width: 6, height: 8)
+        return textView
+    }
+
+    /// Places the text view inside the scroll view and sizes its text container.
+    static func install(textView: SQLTextView, in scrollView: NSScrollView, wordWrap: Bool) {
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = !wordWrap
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+
         textView.autoresizingMask = [.width]
         textView.isVerticallyResizable = true
-        textView.isHorizontallyResizable = !settings.editorWordWrap
+        textView.isHorizontallyResizable = !wordWrap
         textView.minSize = NSSize(width: 0, height: 0)
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
                                   height: CGFloat.greatestFiniteMagnitude)
-        textView.string = tab.text
-
         scrollView.documentView = textView
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        let textView = SQLEditorView.makeTextView(wordWrap: settings.editorWordWrap)
+        textView.delegate = context.coordinator
+        textView.sqlDelegate = context.coordinator
+        SQLEditorView.install(textView: textView, in: scrollView,
+                              wordWrap: settings.editorWordWrap)
+        textView.string = tab.text
 
         let ruler = LineNumberRulerView(textView: textView)
         scrollView.verticalRulerView = ruler
@@ -53,7 +65,10 @@ struct SQLEditorView: NSViewRepresentable {
 
         context.coordinator.textView = textView
         context.coordinator.ruler = ruler
-        context.coordinator.applyAppearance(to: textView, ruler: ruler, scrollView: scrollView)
+        textView.onEffectiveAppearanceChange = { [weak coordinator = context.coordinator] in
+            coordinator?.refreshAppearance()
+        }
+        context.coordinator.applyAppearance(to: textView, ruler: ruler)
         context.coordinator.highlightAll()
 
         NotificationCenter.default.addObserver(
@@ -79,7 +94,7 @@ struct SQLEditorView: NSViewRepresentable {
         }
 
         scrollView.rulersVisible = settings.editorShowLineNumbers
-        context.coordinator.applyAppearance(to: textView, ruler: context.coordinator.ruler, scrollView: scrollView)
+        context.coordinator.applyAppearance(to: textView, ruler: context.coordinator.ruler)
         context.coordinator.ruler?.errorLines = Set(tab.messages
             .filter { $0.kind == .error && $0.scriptLine > 0 }
             .map(\.scriptLine))
@@ -114,21 +129,28 @@ struct SQLEditorView: NSViewRepresentable {
             self.highlighter = SQLHighlighter(palette: Theme.light, font: settings.editorFont)
         }
 
-        func applyAppearance(to textView: SQLTextView, ruler: LineNumberRulerView?, scrollView: NSScrollView) {
-            let isDark = (scrollView.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua)
+        /// Re-resolve after the view joins a window or the system theme flips.
+        func refreshAppearance() {
+            guard let textView else { return }
+            applyAppearance(to: textView, ruler: ruler)
+        }
+
+        func applyAppearance(to textView: SQLTextView, ruler: LineNumberRulerView?) {
+            // Ask the text view itself: before it joins a window its enclosing scroll
+            // view still reports the process default, which is how the wrong palette
+            // used to get latched in.
+            let isDark = textView.effectiveAppearance
+                .bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
             let font = settings.editorFont
             guard appliedDark != isDark || appliedFont != font else { return }
             appliedDark = isDark
             appliedFont = font
 
             let palette = isDark ? Theme.dark : Theme.light
-            textView.font = font
-            textView.palette = palette
+            textView.applyPalette(palette, font: font)
             textView.highlightCurrentLine = settings.editorHighlightCurrentLine
             textView.indentWidth = settings.editorTabWidth
             textView.usesSpacesForTabs = settings.editorUsesSpaces
-            textView.backgroundColor = palette.background
-            textView.insertionPointColor = palette.plain
             ruler?.palette = palette
             ruler?.font = NSFont.monospacedSystemFont(ofSize: max(9, font.pointSize - 2), weight: .regular)
             ruler?.needsDisplay = true

@@ -6,6 +6,9 @@ import SQLServerKit
 /// the same hue relationships at higher lightness so scripts stay recognisable.
 enum Theme {
 
+    /// Every entry is an explicit sRGB colour. A dynamic system colour mixed in here
+    /// resolves against whatever appearance happens to be current, which is how a
+    /// light palette ends up painting near-black text onto a dark background.
     struct SyntaxPalette {
         var plain: NSColor
         var keyword: NSColor
@@ -34,7 +37,7 @@ enum Theme {
         variable: NSColor(srgbRed: 0.40, green: 0.25, blue: 0.00, alpha: 1),
         quotedIdentifier: NSColor(srgbRed: 0.15, green: 0.30, blue: 0.55, alpha: 1),
         op: NSColor(srgbRed: 0.35, green: 0.35, blue: 0.35, alpha: 1),
-        background: NSColor.textBackgroundColor,
+        background: NSColor(srgbRed: 1.00, green: 1.00, blue: 1.00, alpha: 1),
         currentLine: NSColor(srgbRed: 0.96, green: 0.96, blue: 0.90, alpha: 1),
         lineNumber: NSColor(srgbRed: 0.45, green: 0.45, blue: 0.45, alpha: 1),
         lineNumberBackground: NSColor(srgbRed: 0.96, green: 0.96, blue: 0.96, alpha: 1)
@@ -51,7 +54,7 @@ enum Theme {
         variable: NSColor(srgbRed: 0.92, green: 0.74, blue: 0.42, alpha: 1),
         quotedIdentifier: NSColor(srgbRed: 0.62, green: 0.78, blue: 0.98, alpha: 1),
         op: NSColor(srgbRed: 0.70, green: 0.70, blue: 0.72, alpha: 1),
-        background: NSColor.textBackgroundColor,
+        background: NSColor(srgbRed: 0.12, green: 0.12, blue: 0.13, alpha: 1),
         currentLine: NSColor(srgbRed: 0.18, green: 0.18, blue: 0.20, alpha: 1),
         lineNumber: NSColor(srgbRed: 0.55, green: 0.55, blue: 0.58, alpha: 1),
         lineNumberBackground: NSColor(srgbRed: 0.13, green: 0.13, blue: 0.14, alpha: 1)

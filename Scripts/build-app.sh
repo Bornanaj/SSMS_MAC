@@ -6,7 +6,7 @@ set -euo pipefail
 CONFIG="${1:-debug}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP="$ROOT/build/SSMS for Mac.app"
-VERSION="1.0.0"
+VERSION="1.0.1"
 
 cd "$ROOT"
 echo "==> swift build -c $CONFIG"

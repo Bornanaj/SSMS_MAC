@@ -10,6 +10,9 @@ swift build || exit 1
 echo "==> offline regression suite"
 ./.build/debug/ssms-tests || exit 1
 
+echo "==> editor rendering check"
+./.build/debug/ssms-mac --editor-check || exit 1
+
 HOST="${SQL_HOST:-127.0.0.1}"
 PORT="${SQL_PORT:-11433}"
 if ! nc -z -G 2 "$HOST" "$PORT" 2>/dev/null; then

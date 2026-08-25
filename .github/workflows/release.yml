@@ -28,6 +28,9 @@ jobs:
       - name: Offline regression suite
         run: swift run ssms-tests
 
+      - name: Editor rendering check
+        run: swift run ssms-mac --editor-check
+
       - name: Assemble the app bundle
         run: ./Scripts/build-app.sh release
 
