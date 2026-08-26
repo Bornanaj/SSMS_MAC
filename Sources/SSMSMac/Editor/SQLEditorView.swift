@@ -2,6 +2,11 @@ import SwiftUI
 import AppKit
 import SQLServerKit
 
+extension Notification.Name {
+    /// Posted by the Go To Line dialog; the focused editor acts on it.
+    static let ssmsGoToLine = Notification.Name("dev.ssmsmac.goToLine")
+}
+
 /// SwiftUI wrapper around `SQLTextView` with a line-number gutter and live colouring.
 struct SQLEditorView: NSViewRepresentable {
     @ObservedObject var tab: QueryTab
@@ -133,8 +138,23 @@ struct SQLEditorView: NSViewRepresentable {
         textView.onEffectiveAppearanceChange = { [weak coordinator] in
             coordinator?.refreshAppearance()
         }
+        textView.onBookmarksChanged = { [weak container] lines in
+            container?.gutter.bookmarkLines = lines
+        }
         coordinator.applyAppearance(to: textView, gutter: container.gutter)
         coordinator.highlightAll()
+
+        NotificationCenter.default.addObserver(
+            forName: .ssmsGoToLine,
+            object: nil,
+            queue: .main
+        ) { [weak textView] note in
+            MainActor.assumeIsolated {
+                guard let textView, textView.window?.isKeyWindow == true,
+                      let line = note.userInfo?["line"] as? Int else { return }
+                textView.goToLine(line)
+            }
+        }
 
         NotificationCenter.default.addObserver(
             forName: EditorDump.requestNotification,

@@ -21,6 +21,9 @@ final class LineNumberGutterView: NSView {
     var errorLines: Set<Int> = [] {
         didSet { needsDisplay = true }
     }
+    var bookmarkLines: Set<Int> = [] {
+        didSet { needsDisplay = true }
+    }
 
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { true }
@@ -108,6 +111,11 @@ final class LineNumberGutterView: NSView {
                 let y = fragment.minY + inset - scrollOffset + (fragment.height - size.height) / 2
                 label.draw(at: NSPoint(x: bounds.width - size.width - 8, y: y),
                            withAttributes: chosen)
+                if bookmarkLines.contains(lineNumber) {
+                    let marker = NSRect(x: 3, y: y + size.height / 2 - 3, width: 6, height: 6)
+                    NSColor.systemBlue.setFill()
+                    NSBezierPath(ovalIn: marker).fill()
+                }
                 lineNumber += 1
             }
 

@@ -88,6 +88,27 @@ final class QueryTab: ObservableObject, Identifiable {
 
     var isConnected: Bool { connection != nil && !(connection?.isClosed ?? true) }
 
+    var lineCount: Int {
+        let ns = text as NSString
+        var count = 0
+        ns.enumerateSubstrings(in: NSRange(location: 0, length: ns.length),
+                               options: [.byLines, .substringNotRequired]) { _, _, _, _ in
+            count += 1
+        }
+        return max(1, count)
+    }
+
+    var currentLine: Int {
+        let ns = text as NSString
+        let caret = min(selectedRange.location, ns.length)
+        var line = 1
+        ns.enumerateSubstrings(in: NSRange(location: 0, length: caret),
+                               options: [.byLines, .substringNotRequired]) { _, _, _, _ in
+            line += 1
+        }
+        return line
+    }
+
     var displayTitle: String {
         let base = fileURL?.lastPathComponent ?? title
         return isDirty ? base + " •" : base

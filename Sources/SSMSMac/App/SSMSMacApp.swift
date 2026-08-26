@@ -229,6 +229,41 @@ struct AppCommands: Commands {
             .disabled(currentServer == nil)
         }
 
+        CommandMenu("Edit Extras") {
+            Button("Go To Line…") { app.showGoToLine = true }
+                .keyboardShortcut("l", modifiers: .command)
+                .disabled(app.selectedTab == nil)
+
+            Divider()
+
+            Button("Toggle Bookmark") {
+                NSApp.sendAction(#selector(SQLTextView.toggleBookmark(_:)), to: nil, from: nil)
+            }
+            .keyboardShortcut(KeyEquivalent("\u{F705}"), modifiers: .command)
+
+            Button("Next Bookmark") {
+                NSApp.sendAction(#selector(SQLTextView.nextBookmark(_:)), to: nil, from: nil)
+            }
+            .keyboardShortcut(KeyEquivalent("\u{F705}"), modifiers: [])
+
+            Button("Previous Bookmark") {
+                NSApp.sendAction(#selector(SQLTextView.previousBookmark(_:)), to: nil, from: nil)
+            }
+            .keyboardShortcut(KeyEquivalent("\u{F705}"), modifiers: .shift)
+
+            Button("Clear All Bookmarks") {
+                NSApp.sendAction(#selector(SQLTextView.clearBookmarks(_:)), to: nil, from: nil)
+            }
+            .keyboardShortcut(KeyEquivalent("\u{F705}"), modifiers: [.command, .shift])
+
+            Divider()
+
+            Button("Server Properties…") {
+                if let server = currentServer { app.activeSheet = .serverProperties(server.id) }
+            }
+            .disabled(currentServer == nil)
+        }
+
         CommandGroup(after: .sidebar) {
             Button("Toggle Results Pane") {
                 app.selectedTab?.showResultsPane.toggle()

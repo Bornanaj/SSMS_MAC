@@ -17,6 +17,13 @@ struct MainWindowView: View {
         .sheet(item: $app.activeSheet) { sheet in
             sheetContent(sheet)
         }
+        .sheet(isPresented: $app.showGoToLine) {
+            GoToLineSheet(lineCount: max(1, app.selectedTab?.lineCount ?? 1),
+                          currentLine: app.selectedTab?.currentLine ?? 1) { line in
+                NotificationCenter.default.post(name: .ssmsGoToLine, object: nil,
+                                                userInfo: ["line": line])
+            }
+        }
         .sheet(isPresented: Binding(get: { app.pendingTemplateScript != nil },
                                     set: { if !$0 { app.pendingTemplateScript = nil } })) {
             if let script = app.pendingTemplateScript {
@@ -221,6 +228,10 @@ struct MainWindowView: View {
         case .reports(let serverID, let database):
             if let server = app.server(id: serverID) {
                 ReportsSheet(server: server, initialDatabase: database)
+            }
+        case .serverProperties(let serverID):
+            if let server = app.server(id: serverID) {
+                ServerPropertiesSheet(server: server)
             }
         case .scriptPreview(let title, let sql):
             ScriptPreviewSheet(title: title, sql: sql)

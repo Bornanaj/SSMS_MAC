@@ -40,6 +40,7 @@ final class AppState: ObservableObject {
     @Published var statusMessage: String = "Ready"
     /// Set to the current script when the user asks to fill in template placeholders.
     @Published var pendingTemplateScript: String?
+    @Published var showGoToLine = false
 
     let explorer = ObjectExplorerModel()
     let connections = ConnectionStore()
@@ -74,6 +75,7 @@ final class AppState: ObservableObject {
         case permissions(UUID, String, String?, String?)
         case agentJobs(UUID)
         case reports(UUID, String?)
+        case serverProperties(UUID)
 
         var id: String {
             switch self {
@@ -103,6 +105,7 @@ final class AppState: ObservableObject {
                 return "perms-\(s)-\(d)-\(sc ?? "")-\(o ?? "")"
             case .agentJobs(let s): return "agent-\(s)"
             case .reports(let s, let d): return "reports-\(s)-\(d ?? "")"
+            case .serverProperties(let s): return "serverprops-\(s)"
             }
         }
     }

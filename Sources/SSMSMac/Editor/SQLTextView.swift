@@ -23,6 +23,12 @@ final class SQLTextView: NSTextView {
     private var completionTimer: Timer?
     let completionPanel = CompletionPanelController()
 
+    /// 1-based lines the user has bookmarked, mirrored into the gutter.
+    var bookmarks: Set<Int> = [] {
+        didSet { onBookmarksChanged?(bookmarks) }
+    }
+    var onBookmarksChanged: ((Set<Int>) -> Void)?
+
     /// Raised when the view lands in a window or the system switches light/dark, so
     /// the coordinator can re-resolve the palette against a real appearance.
     var onEffectiveAppearanceChange: (() -> Void)?
@@ -241,6 +247,79 @@ final class SQLTextView: NSTextView {
         rect.origin.y += textContainerInset.height
         if rect.width < 1 { rect.size.width = 1 }
         return rect
+    }
+
+    // MARK: - Navigation
+
+    /// 1-based line containing the caret.
+    var currentLine: Int {
+        let text = string as NSString
+        let caret = min(selectedRange().location, text.length)
+        var line = 1
+        text.enumerateSubstrings(in: NSRange(location: 0, length: caret),
+                                 options: [.byLines, .substringNotRequired]) { _, _, _, _ in
+            line += 1
+        }
+        return line
+    }
+
+    var lineCount: Int {
+        let text = string as NSString
+        var count = 0
+        text.enumerateSubstrings(in: NSRange(location: 0, length: text.length),
+                                 options: [.byLines, .substringNotRequired]) { _, _, _, _ in
+            count += 1
+        }
+        return max(1, count)
+    }
+
+    /// Character range of a 1-based line.
+    func range(ofLine line: Int) -> NSRange? {
+        let text = string as NSString
+        guard line >= 1 else { return nil }
+        var current = 1
+        var offset = 0
+        while current < line {
+            guard offset < text.length else { return nil }
+            let lineRange = text.lineRange(for: NSRange(location: offset, length: 0))
+            offset = NSMaxRange(lineRange)
+            current += 1
+        }
+        guard offset <= text.length else { return nil }
+        return text.lineRange(for: NSRange(location: min(offset, text.length), length: 0))
+    }
+
+    @objc func goToLine(_ line: Int) {
+        guard let range = range(ofLine: line) else { return }
+        setSelectedRange(NSRange(location: range.location, length: 0))
+        scrollRangeToVisible(range)
+        showFindIndicator(for: range)
+    }
+
+    // MARK: - Bookmarks
+
+    @objc func toggleBookmark(_ sender: Any?) {
+        let line = currentLine
+        if bookmarks.contains(line) { bookmarks.remove(line) } else { bookmarks.insert(line) }
+    }
+
+    @objc func nextBookmark(_ sender: Any?) {
+        guard !bookmarks.isEmpty else { return }
+        let line = currentLine
+        // Wrap around, which is what F2 does in SSMS.
+        let target = bookmarks.sorted().first { $0 > line } ?? bookmarks.min()
+        if let target { goToLine(target) }
+    }
+
+    @objc func previousBookmark(_ sender: Any?) {
+        guard !bookmarks.isEmpty else { return }
+        let line = currentLine
+        let target = bookmarks.sorted().last { $0 < line } ?? bookmarks.max()
+        if let target { goToLine(target) }
+    }
+
+    @objc func clearBookmarks(_ sender: Any?) {
+        bookmarks.removeAll()
     }
 
     @objc func expandWildcards(_ sender: Any?) {
