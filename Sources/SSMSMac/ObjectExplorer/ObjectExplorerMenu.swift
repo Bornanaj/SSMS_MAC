@@ -33,6 +33,15 @@ struct ObjectExplorerMenu: View {
         Button("Activity Monitor") {
             if let server = app.server(for: node) { app.activeSheet = .activityMonitor(server.id) }
         }
+        Button("Reports…") {
+            if let server = app.server(for: node) { app.activeSheet = .reports(server.id, nil) }
+        }
+        Button("SQL Server Agent Jobs…") {
+            if let server = app.server(for: node) { app.activeSheet = .agentJobs(server.id) }
+        }
+        Button("Logins…") {
+            if let server = app.server(for: node) { app.activeSheet = .logins(server.id) }
+        }
         Divider()
         refreshItem
         Button("Disconnect") {
@@ -98,6 +107,21 @@ struct ObjectExplorerMenu: View {
                 }
             }
         }
+        Button("Security…") {
+            if let server = app.server(for: node), let name = node.name {
+                app.activeSheet = .databaseSecurity(server.id, name)
+            }
+        }
+        Button("Permissions…") {
+            if let server = app.server(for: node), let name = node.name {
+                app.activeSheet = .permissions(server.id, name, nil, nil)
+            }
+        }
+        Button("Reports…") {
+            if let server = app.server(for: node), let name = node.name {
+                app.activeSheet = .reports(server.id, name)
+            }
+        }
         Divider()
         refreshItem
         Button("Properties") {
@@ -126,6 +150,12 @@ struct ObjectExplorerMenu: View {
             }
         }
         dependenciesItem
+        Button("Permissions…") {
+            if let server = app.server(for: node), let database = node.database,
+               let schema = node.schema, let name = node.name {
+                app.activeSheet = .permissions(server.id, database, schema, name)
+            }
+        }
         Divider()
         Menu("Script Table as") {
             scriptItem("CREATE To", .create)

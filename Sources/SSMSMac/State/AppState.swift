@@ -69,6 +69,11 @@ final class AppState: ObservableObject {
         case diskUsage(UUID, String)
         case queryOptions
         case templates
+        case logins(UUID)
+        case databaseSecurity(UUID, String)
+        case permissions(UUID, String, String?, String?)
+        case agentJobs(UUID)
+        case reports(UUID, String?)
 
         var id: String {
             switch self {
@@ -92,6 +97,12 @@ final class AppState: ObservableObject {
             case .diskUsage(let s, let d): return "diskusage-\(s)-\(d)"
             case .queryOptions: return "queryoptions"
             case .templates: return "templates"
+            case .logins(let s): return "logins-\(s)"
+            case .databaseSecurity(let s, let d): return "dbsecurity-\(s)-\(d)"
+            case .permissions(let s, let d, let sc, let o):
+                return "perms-\(s)-\(d)-\(sc ?? "")-\(o ?? "")"
+            case .agentJobs(let s): return "agent-\(s)"
+            case .reports(let s, let d): return "reports-\(s)-\(d ?? "")"
             }
         }
     }

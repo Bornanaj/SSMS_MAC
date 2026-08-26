@@ -171,6 +171,33 @@ struct AppCommands: Commands {
             }
             .disabled(currentServer == nil)
 
+            Button("Reports…") {
+                if let server = currentServer {
+                    app.activeSheet = .reports(server.id, app.selectedTab?.database)
+                }
+            }
+            .keyboardShortcut("r", modifiers: [.command, .option])
+            .disabled(currentServer == nil)
+
+            Button("SQL Server Agent Jobs…") {
+                if let server = currentServer { app.activeSheet = .agentJobs(server.id) }
+            }
+            .disabled(currentServer == nil)
+
+            Divider()
+
+            Button("Logins…") {
+                if let server = currentServer { app.activeSheet = .logins(server.id) }
+            }
+            .disabled(currentServer == nil)
+
+            Button("Database Security…") {
+                if let server = currentServer, let database = app.selectedTab?.database {
+                    app.activeSheet = .databaseSecurity(server.id, database)
+                }
+            }
+            .disabled(currentServer == nil)
+
             Button("Index Maintenance…") {
                 if let server = currentServer, let database = app.selectedTab?.database {
                     app.activeSheet = .indexMaintenance(server.id, database)

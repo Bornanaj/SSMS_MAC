@@ -201,6 +201,27 @@ struct MainWindowView: View {
                     app.activeSheet = nil
                 }
             }
+        case .logins(let serverID):
+            if let server = app.server(id: serverID) {
+                LoginsSheet(server: server)
+            }
+        case .databaseSecurity(let serverID, let database):
+            if let server = app.server(id: serverID) {
+                DatabaseSecuritySheet(server: server, database: database)
+            }
+        case .permissions(let serverID, let database, let schema, let object):
+            if let server = app.server(id: serverID) {
+                PermissionsSheet(server: server, database: database,
+                                 schema: schema, object: object)
+            }
+        case .agentJobs(let serverID):
+            if let server = app.server(id: serverID) {
+                AgentJobsSheet(server: server)
+            }
+        case .reports(let serverID, let database):
+            if let server = app.server(id: serverID) {
+                ReportsSheet(server: server, initialDatabase: database)
+            }
         case .scriptPreview(let title, let sql):
             ScriptPreviewSheet(title: title, sql: sql)
         case .exportResults:
