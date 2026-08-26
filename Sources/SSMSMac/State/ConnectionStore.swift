@@ -58,8 +58,13 @@ final class ConnectionStore: ObservableObject {
         persist()
     }
 
-    func password(for profile: ConnectionProfile) -> String? {
+    /// Synchronous read. Only safe away from the main thread; views use the async form.
+    nonisolated func password(for profile: ConnectionProfile) -> String? {
         Keychain.password(for: profile.credentialKey)
+    }
+
+    func password(for profile: ConnectionProfile) async -> String? {
+        await Keychain.password(for: profile.credentialKey)
     }
 
     /// Most recently used servers, for the Connect dialog's server combo box.

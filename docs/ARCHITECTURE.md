@@ -129,6 +129,28 @@ layout is a few dozen extra lines and removes an entire class of failure.
 `--editor-check` asserts the clip view's frame and bounds both start at the origin,
 which is the signature this bug leaves behind.
 
+## The keychain must never be read from a view update
+
+The connect dialog filled in a saved password from `onAppear`, which runs on the main
+thread inside a SwiftUI update. `SecItemCopyMatching` blocks on the security daemon, and
+after every ad-hoc re-sign macOS wants to prompt before handing the item over. The prompt
+cannot be drawn while the main thread is inside a layout pass, so launch simply stopped:
+
+```
+ConnectSheet.body.getter
+  -> ConnectSheet.prefill()
+    -> ConnectionStore.password(for:)
+      -> Keychain.password(for:)
+        -> mach_msg                     [blocked]
+```
+
+Nothing crashed and nothing logged; the window never appeared. `Keychain.password(for:)`
+now has an async form that hops to a background queue, and every UI path uses it. The
+synchronous form is marked as safe only away from the main thread.
+
+`Scripts/test.sh` bounds the self test at 180 seconds, because a hang is a real failure
+here and an unbounded run would just stall.
+
 ## Testing without Xcode
 
 XCTest ships with Xcode, not with the Command Line Tools, so `swift test` is unavailable in

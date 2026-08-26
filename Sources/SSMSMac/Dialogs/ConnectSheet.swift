@@ -29,7 +29,7 @@ struct ConnectSheet: View {
             footer
         }
         .frame(width: 780, height: showOptions ? 620 : 470)
-        .onAppear(perform: prefill)
+        .task { await prefill() }
     }
 
     private var header: some View {
@@ -73,9 +73,13 @@ struct ConnectSheet: View {
             .listStyle(.sidebar)
             .onChange(of: selectedSavedID) { _, newValue in
                 guard let newValue,
-                      let saved = app.connections.profiles.first(where: { $0.id == newValue }) else { return }
+                      let saved = app.connections.profiles.first(where: { $0.id == newValue })
+                else { return }
                 profile = saved
-                password = app.connections.password(for: saved) ?? ""
+                password = ""
+                // Reading the keychain can block and can prompt, so it never happens
+                // inline in a view update.
+                Task { password = await app.connections.password(for: saved) ?? "" }
             }
         }
     }
@@ -212,12 +216,13 @@ struct ConnectSheet: View {
         .padding(14)
     }
 
-    private func prefill() {
-        if profile.server.isEmpty, let recent = app.connections.profiles.first {
+    private func prefill() async {
+        guard profile.server.isEmpty else { return }
+        if let recent = app.connections.profiles.first {
             profile = recent
             selectedSavedID = recent.id
-            password = app.connections.password(for: recent) ?? ""
-        } else if profile.server.isEmpty {
+            password = await app.connections.password(for: recent) ?? ""
+        } else {
             profile.server = "localhost"
             profile.username = "sa"
         }

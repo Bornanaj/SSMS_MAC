@@ -50,7 +50,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if SelfTest.isRequested {
             setvbuf(stdout, nil, _IOLBF, 0)
             NSApp.setActivationPolicy(.accessory)
-            for window in NSApp.windows { window.setFrame(.zero, display: false) }
+            // Ordering the window out keeps it off screen without the forced layout
+            // pass that resizing to zero triggers.
+            for window in NSApp.windows { window.orderOut(nil) }
             Task { @MainActor in
                 let status = await SelfTest.run()
                 exit(status)
@@ -77,6 +79,9 @@ struct AppCommands: Commands {
 
             Button("Connect to Server…") { app.activeSheet = .connect }
                 .keyboardShortcut("n", modifiers: [.command, .shift])
+
+            Button("Registered Servers…") { app.activeSheet = .registeredServers }
+                .keyboardShortcut("r", modifiers: [.command, .control])
 
             Divider()
 
@@ -210,6 +215,13 @@ struct AppCommands: Commands {
             Button("Import Flat File…") {
                 if let server = currentServer, let database = app.selectedTab?.database {
                     app.activeSheet = .importFlatFile(server.id, database)
+                }
+            }
+            .disabled(currentServer == nil)
+
+            Button("Export Data…") {
+                if let server = currentServer, let database = app.selectedTab?.database {
+                    app.activeSheet = .exportData(server.id, database, nil, nil)
                 }
             }
             .disabled(currentServer == nil)

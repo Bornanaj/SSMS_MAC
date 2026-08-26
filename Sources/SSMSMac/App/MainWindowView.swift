@@ -34,6 +34,9 @@ struct MainWindowView: View {
             }
         }
         .task {
+            // The headless runs drive AppState themselves; presenting the connect
+            // sheet there would block on the keychain with nobody to answer it.
+            guard !SelfTest.isRequested, !EditorCheck.isRequested else { return }
             if app.servers.isEmpty { app.activeSheet = .connect }
         }
     }
@@ -232,6 +235,12 @@ struct MainWindowView: View {
         case .serverProperties(let serverID):
             if let server = app.server(id: serverID) {
                 ServerPropertiesSheet(server: server)
+            }
+        case .registeredServers:
+            RegisteredServersSheet()
+        case .exportData(let serverID, let database, let schema, let table):
+            if let server = app.server(id: serverID) {
+                ExportDataSheet(server: server, database: database, schema: schema, table: table)
             }
         case .scriptPreview(let title, let sql):
             ScriptPreviewSheet(title: title, sql: sql)

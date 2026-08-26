@@ -100,6 +100,11 @@ struct ObjectExplorerMenu: View {
                     app.activeSheet = .importFlatFile(server.id, name)
                 }
             }
+            Button("Export Data…") {
+                if let server = app.server(for: node), let name = node.name {
+                    app.activeSheet = .exportData(server.id, name, nil, nil)
+                }
+            }
             Divider()
             Button("Index Maintenance…") {
                 if let server = app.server(for: node), let name = node.name {
@@ -154,6 +159,12 @@ struct ObjectExplorerMenu: View {
             if let server = app.server(for: node), let database = node.database,
                let schema = node.schema, let name = node.name {
                 app.activeSheet = .permissions(server.id, database, schema, name)
+            }
+        }
+        Button("Export Data…") {
+            if let server = app.server(for: node), let database = node.database,
+               let schema = node.schema, let name = node.name {
+                app.activeSheet = .exportData(server.id, database, schema, name)
             }
         }
         Divider()

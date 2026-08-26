@@ -76,6 +76,8 @@ final class AppState: ObservableObject {
         case agentJobs(UUID)
         case reports(UUID, String?)
         case serverProperties(UUID)
+        case registeredServers
+        case exportData(UUID, String, String?, String?)
 
         var id: String {
             switch self {
@@ -106,6 +108,9 @@ final class AppState: ObservableObject {
             case .agentJobs(let s): return "agent-\(s)"
             case .reports(let s, let d): return "reports-\(s)-\(d ?? "")"
             case .serverProperties(let s): return "serverprops-\(s)"
+            case .registeredServers: return "registeredservers"
+            case .exportData(let s, let d, let sc, let t):
+                return "exportdata-\(s)-\(d)-\(sc ?? "")-\(t ?? "")"
             }
         }
     }

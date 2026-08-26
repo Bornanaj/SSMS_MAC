@@ -39,6 +39,18 @@ enum Keychain {
         return String(data: data, encoding: .utf8)
     }
 
+    /// The synchronous read blocks on the security daemon, and macOS may decide to
+    /// prompt — which never returns if the caller is the main thread mid-layout. Every
+    /// UI path goes through this instead.
+    static func password(for account: String) async -> String? {
+        guard !account.isEmpty else { return nil }
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(returning: password(for: account))
+            }
+        }
+    }
+
     static func removePassword(for account: String) {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,

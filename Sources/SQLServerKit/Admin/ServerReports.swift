@@ -159,7 +159,7 @@ public struct ServerReports: Sendable {
         }
     }
 
-    static func convert(_ set: TDSResultSet) -> ReportResult {
+    public static func convert(_ set: TDSResultSet) -> ReportResult {
         var numeric = Set<Int>()
         for column in set.columns where column.typeInfo.dataType.isNumeric {
             numeric.insert(column.index)
