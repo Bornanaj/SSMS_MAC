@@ -7,8 +7,9 @@
 
 A native macOS SQL Server client in the shape of SQL Server Management Studio:
 Object Explorer, a T-SQL editor with IntelliSense, a results grid, execution plans,
-scripting, an editable data grid, activity monitoring, backup/restore and flat-file
-import.
+scripting, an editable data grid, activity monitoring, backup/restore, flat-file
+import, a Generate Scripts wizard, Query Store reports, the error log viewer and SQL
+Agent job control.
 
 It talks to SQL Server directly. There is **no ODBC driver, FreeTDS, Docker container
 or JVM to install** — the TDS 7.4 protocol is implemented in Swift inside this repo.
@@ -97,28 +98,56 @@ swift build -c release          # libraries and executables
 - The SSMS tree: Databases → Tables/Views/Programmability/Storage/Security, plus
   server‑level Security, Server Objects and Management
 - Lazy expansion, one round trip per folder, name filter, system‑object toggle
+- Object Explorer Details (⌘7): the selected folder as a sortable table
 - Context menus: Select Top 1000 Rows, Edit Top 200 Rows, Script as
-  CREATE/ALTER/DROP/SELECT/INSERT/UPDATE/DELETE, Properties, Refresh
+  CREATE/ALTER/DROP/SELECT/INSERT/UPDATE/DELETE, View Dependencies, Rename, Delete,
+  Permissions, Properties, Refresh
+- Scripting covers synonyms, sequences, user‑defined data and table types, schemas,
+  users, roles, logins, partition functions and schemes, and XML schema collections
 
 **Query editor**
-- T‑SQL syntax colouring, line numbers, current‑line highlight
+- T‑SQL syntax colouring, line numbers, current‑line highlight, bookmarks in the gutter
 - IntelliSense that understands aliases: `c.` after `FROM dbo.Customers AS c` lists that
   table's columns; `EXEC sales.` lists only procedures
-- Signature help, snippets, block indent, comment toggle, SQL formatter
+- Signature help, snippets, block indent, comment toggle, SQL formatter, Go To Line
+- Template Explorer with ~30 T‑SQL templates, and a parameter dialog (⌘⇧M) that fills in
+  `<name, type, value>` placeholders — including the ones the scripter emits
 - `GO` batch splitting including `GO 5`, comment‑ and string‑aware
 - F5 executes, ⇧F5 executes the selection, ⌘. cancels (a real TDS attention)
+- Per‑window Query Options: every SET option, isolation level, lock timeout, row caps
+- Run one script against several connected servers and merge the grids
 
 **Results**
 - Virtualised grid backed by `NSTableView`; 100k rows stay responsive
+- Results to Grid (⌘D), Results to Text (⌘T) and Results to File (⌘⌃F)
 - Multiple result sets, Messages with clickable error lines, client statistics
 - Actual and estimated execution plans with per‑operator cost and missing‑index hints
 - Export to CSV, TSV, JSON, XML, Markdown, HTML, SQL INSERT and XLSX
 
 **Administration**
+- Server Properties: General, Memory, Processors, Security and an Advanced page that
+  edits `sys.configurations` through `sp_configure` and can script the change
 - Activity Monitor: processes, blocking, resource waits, expensive queries, file I/O, KILL
-- Database and table properties, index fragmentation with rebuild/reorganize
+- Server dashboard with live per‑second rates, cache hit ratio, page life expectancy and
+  a database list that flags anything without a recent full backup
+- New Database, Attach, Detach, Shrink Database / Shrink Files, Rename, Delete
+- Permissions pages for the server, a database, a schema and any object, driven by
+  `sys.fn_builtin_permissions` so the list matches the server version
+- Database and table properties, index fragmentation with rebuild/reorganize, and
+  per‑index Rebuild / Reorganize / Disable
+- Generate Scripts wizard: pick objects, order them by dependency, script schema and
+  optionally data, then send it to a window, the clipboard or a file
 - Backup and restore script generation, `RESTORE HEADERONLY` / `FILELISTONLY` inspection
 - Import Flat File with delimiter sniffing, encoding detection and type inference
+
+**Monitoring**
+- SQL Server and SQL Agent error logs through `sp_readerrorlog`, with archive selection,
+  server‑side filtering and a severity column inferred from the message text
+- SQL Server Agent: job list with last and next run, steps, schedules rendered as
+  sentences, history, and Start / Stop / Enable / Disable / Script
+- Query Store: top resource consumers by seven metrics, regressed queries against a
+  baseline window, forced plans, plan forcing and unforcing, and the storage settings
+- Blocking chains assembled into a tree, including heads that have already disconnected
 
 ## Data fidelity
 
@@ -142,7 +171,7 @@ into mojibake.
 ## Testing
 
 ```bash
-swift run ssms-tests          # 120 offline regression checks, no server needed
+swift run ssms-tests          # 454 offline regression checks, no server needed
 swift run tdscli all          # service smoke tests against a live server
 ./.build/debug/ssms-mac --selftest   # drives the real UI models end to end
 ```
@@ -165,8 +194,14 @@ docker run -d --platform linux/amd64 --name ssms-mac-test \
 - MARS is not negotiated. Each query window owns its own connection, which is how SSMS
   behaves anyway.
 - The execution plan is a cost‑annotated operator tree, not the SSMS graphical canvas.
-- Always On, Replication, Service Broker and SQL Agent job editing are not implemented;
-  SQL Agent jobs are listed but not editable.
+- Always On, Replication and Service Broker are not implemented. SQL Agent jobs can be
+  started, stopped, enabled, scripted and inspected, but not edited.
+- The error log viewer needs `securityadmin`, and the Advanced page of Server Properties
+  needs `sysadmin`; both degrade to a clear message rather than an empty list.
+- Multi-server query runs the servers one after another rather than in parallel, and it
+  merges result sets positionally — it does not check that the columns line up.
+- Generate Scripts caps scripted data per table and reports what it skipped; it does not
+  stream, so a very large table is better handled with `bcp`.
 
 ## Contributing
 

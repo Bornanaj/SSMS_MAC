@@ -106,6 +106,18 @@ public struct ResultSetHandle: Sendable, Hashable {
     public var columns: [TDSColumn]
     /// True when this "result set" is actually a showplan payload.
     public var isExecutionPlan: Bool
+
+    public init(id: UUID = UUID(),
+                batchIndex: Int = 0,
+                ordinal: Int = 1,
+                columns: [TDSColumn] = [],
+                isExecutionPlan: Bool = false) {
+        self.id = id
+        self.batchIndex = batchIndex
+        self.ordinal = ordinal
+        self.columns = columns
+        self.isExecutionPlan = isExecutionPlan
+    }
 }
 
 public struct ClientStatistics: Sendable, Hashable {

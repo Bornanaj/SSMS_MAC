@@ -7,7 +7,9 @@ import TDSKit
 /// because scripting needs far more detail per object than the tree does.
 public struct ScriptGenerator: Sendable {
 
-    private let session: SQLServerSession
+    /// Visible inside the module so the per-kind scripters in `ScriptGeneratorExtras`
+    /// can run their own catalog queries.
+    let session: SQLServerSession
 
     public init(session: SQLServerSession) {
         self.session = session
@@ -51,13 +53,14 @@ public struct ScriptGenerator: Sendable {
                                           kind: node.kind, action: action, options: options)
 
         case .index:
-            let table = node.info["table"] ?? ""
+            let table = node.info["parentTable"] ?? node.info["table"] ?? ""
             return try await indexScript(database: database, schema: schema, table: table,
                                          index: name, action: action, options: options)
 
         default:
-            throw SQLServerError.unsupportedOperation(
-                "Scripting is not supported for this object type.")
+            // Synonyms, sequences, user-defined types and schemas are scripted from their
+            // catalog rows rather than from a module definition.
+            return try await extraScript(node: node, action: action, options: options)
         }
     }
 

@@ -28,6 +28,12 @@ struct SSMSMacApp: App {
             QueryHistoryView()
                 .environmentObject(app)
         }
+
+        Window("Template Explorer", id: "templates") {
+            TemplateExplorerView()
+                .environmentObject(app)
+                .environmentObject(settings)
+        }
     }
 }
 
@@ -57,13 +63,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct AppCommands: Commands {
     @ObservedObject var app: AppState
     @ObservedObject var settings: AppSettings
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
+        fileCommands
+        saveCommands
+        editCommands
+        queryCommands
+        resultsCommands
+        toolsCommands
+        viewCommands
+
+        CommandGroup(replacing: .help) {
+            Link("SQL Server T-SQL reference",
+                 destination: URL(string: "https://learn.microsoft.com/sql/t-sql/language-reference")!)
+        }
+    }
+
+    // MARK: - File
+
+    private var fileCommands: some Commands {
         CommandGroup(replacing: .newItem) {
             Button("New Query") {
                 Task {
-                    let server = app.servers.first { $0.id == app.selectedTab?.sessionID } ?? app.servers.first
-                    await app.newQueryTab(server: server, database: app.selectedTab?.database)
+                    await app.newQueryTab(server: currentServer,
+                                          database: app.selectedTab?.database)
                 }
             }
             .keyboardShortcut("n", modifiers: .command)
@@ -72,12 +96,19 @@ struct AppCommands: Commands {
             Button("Connect to Server…") { app.activeSheet = .connect }
                 .keyboardShortcut("n", modifiers: [.command, .shift])
 
+            Button("New Database…") {
+                if let server = currentServer { app.activeSheet = .newDatabase(server.id) }
+            }
+            .disabled(currentServer == nil)
+
             Divider()
 
             Button("Open Script…") { openScript() }
                 .keyboardShortcut("o", modifiers: .command)
         }
+    }
 
+    private var saveCommands: some Commands {
         CommandGroup(replacing: .saveItem) {
             Button("Save Script") { saveScript(as: false) }
                 .keyboardShortcut("s", modifiers: .command)
@@ -86,7 +117,42 @@ struct AppCommands: Commands {
                 .keyboardShortcut("s", modifiers: [.command, .shift])
                 .disabled(app.selectedTab == nil)
         }
+    }
 
+    // MARK: - Edit
+
+    private var editCommands: some Commands {
+        CommandGroup(after: .pasteboard) {
+            Divider()
+            Button("Go To Line…") {
+                if let tab = app.selectedTab { app.activeSheet = .goToLine(tab.id) }
+            }
+            .keyboardShortcut("g", modifiers: .command)
+            .disabled(app.selectedTab == nil)
+
+            Menu("Bookmarks") {
+                Button("Toggle Bookmark") { app.selectedTab?.toggleBookmark() }
+                    .keyboardShortcut("k", modifiers: [.command, .option])
+                Button("Next Bookmark") { app.selectedTab?.goToNextBookmark() }
+                    .keyboardShortcut("n", modifiers: [.command, .option])
+                Button("Previous Bookmark") { app.selectedTab?.goToPreviousBookmark() }
+                    .keyboardShortcut("p", modifiers: [.command, .option])
+                Divider()
+                Button("Clear All Bookmarks") { app.selectedTab?.clearBookmarks() }
+            }
+            .disabled(app.selectedTab == nil)
+
+            Button("Specify Values for Template Parameters…") {
+                if let tab = app.selectedTab { app.activeSheet = .templateParameters(tab.id) }
+            }
+            .keyboardShortcut("m", modifiers: [.command, .shift])
+            .disabled(app.selectedTab == nil)
+        }
+    }
+
+    // MARK: - Query
+
+    private var queryCommands: some Commands {
         CommandMenu("Query") {
             Button("Execute") { app.selectedTab?.execute() }
                 .keyboardShortcut("r", modifiers: .command)
@@ -96,13 +162,20 @@ struct AppCommands: Commands {
                 .keyboardShortcut(".", modifiers: .command)
                 .disabled(app.selectedTab?.isExecuting != true)
 
+            Button("Run on Multiple Servers…") {
+                if let tab = app.selectedTab { app.activeSheet = .multiServerQuery(tab.id) }
+            }
+            .disabled(app.selectedTab == nil || app.servers.count < 2)
+
             Divider()
 
             Toggle("Include Actual Execution Plan", isOn: bindingActualPlan)
-                .keyboardShortcut("m", modifiers: [.command, .shift])
+                .keyboardShortcut("m", modifiers: [.command, .control])
 
             Toggle("Display Estimated Execution Plan", isOn: bindingEstimatedPlan)
                 .keyboardShortcut("l", modifiers: [.command, .shift])
+
+            Toggle("Include Client Statistics", isOn: bindingClientStatistics)
 
             Divider()
 
@@ -117,46 +190,134 @@ struct AppCommands: Commands {
                 app.selectedTab?.refreshIntelliSenseCatalog()
             }
             .keyboardShortcut("r", modifiers: [.command, .shift])
-        }
 
+            Button("Query Options…") {
+                if let tab = app.selectedTab { app.activeSheet = .queryOptions(tab.id) }
+            }
+            .keyboardShortcut("o", modifiers: [.command, .option])
+            .disabled(app.selectedTab == nil)
+        }
+    }
+
+    private var resultsCommands: some Commands {
+        CommandMenu("Results") {
+            Button("Results to Grid") { app.selectedTab?.resultsDestination = .grid }
+                .keyboardShortcut("d", modifiers: .command)
+            Button("Results to Text") { app.selectedTab?.resultsDestination = .text }
+                .keyboardShortcut("t", modifiers: .command)
+            Button("Results to File") { app.selectedTab?.resultsDestination = .file }
+                .keyboardShortcut("f", modifiers: [.command, .control])
+
+            Divider()
+
+            Button("Re-render Text Results") { app.selectedTab?.renderTextResults() }
+                .disabled(app.selectedTab == nil)
+
+            Button("Copy Text Results") {
+                guard let text = app.selectedTab?.textResults, !text.isEmpty else { return }
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(text, forType: .string)
+            }
+            .disabled(app.selectedTab?.textResults.isEmpty != false)
+        }
+    }
+
+    // MARK: - Tools
+
+    private var toolsCommands: some Commands {
         CommandMenu("Tools") {
             Button("Activity Monitor") {
                 if let server = currentServer { app.activeSheet = .activityMonitor(server.id) }
             }
             .disabled(currentServer == nil)
 
-            Button("Index Maintenance…") {
-                if let server = currentServer, let database = app.selectedTab?.database {
-                    app.activeSheet = .indexMaintenance(server.id, database)
-                }
+            Button("Server Dashboard") {
+                if let server = currentServer { app.activeSheet = .serverDashboard(server.id) }
+            }
+            .disabled(currentServer == nil)
+
+            Button("SQL Server Logs") {
+                if let server = currentServer { app.activeSheet = .serverLog(server.id) }
+            }
+            .disabled(currentServer == nil)
+
+            Button("SQL Server Agent Jobs") {
+                if let server = currentServer { app.activeSheet = .agentJob(server.id, "") }
             }
             .disabled(currentServer == nil)
 
             Divider()
 
+            Button("Query Store…") {
+                if let server = currentServer, let database = currentDatabase {
+                    app.activeSheet = .queryStore(server.id, database)
+                }
+            }
+            .disabled(currentServer == nil || currentDatabase == nil)
+
+            Button("Index Maintenance…") {
+                if let server = currentServer, let database = currentDatabase {
+                    app.activeSheet = .indexMaintenance(server.id, database)
+                }
+            }
+            .disabled(currentServer == nil || currentDatabase == nil)
+
+            Button("Generate Scripts…") {
+                if let server = currentServer, let database = currentDatabase {
+                    app.activeSheet = .generateScripts(server.id, database)
+                }
+            }
+            .disabled(currentServer == nil || currentDatabase == nil)
+
             Button("Import Flat File…") {
-                if let server = currentServer, let database = app.selectedTab?.database {
+                if let server = currentServer, let database = currentDatabase {
                     app.activeSheet = .importFlatFile(server.id, database)
                 }
             }
+            .disabled(currentServer == nil || currentDatabase == nil)
+
+            Divider()
+
+            Button("Server Properties…") {
+                if let server = currentServer { app.activeSheet = .serverProperties(server.id) }
+            }
             .disabled(currentServer == nil)
         }
+    }
 
+    // MARK: - View
+
+    private var viewCommands: some Commands {
         CommandGroup(after: .sidebar) {
             Button("Toggle Results Pane") {
                 app.selectedTab?.showResultsPane.toggle()
             }
             .keyboardShortcut("y", modifiers: .command)
-        }
 
-        CommandGroup(replacing: .help) {
-            Link("SQL Server T-SQL reference",
-                 destination: URL(string: "https://learn.microsoft.com/sql/t-sql/language-reference")!)
+            Button(app.showExplorerDetails
+                   ? "Hide Object Explorer Details" : "Show Object Explorer Details") {
+                app.showExplorerDetails.toggle()
+            }
+            .keyboardShortcut("7", modifiers: .command)
+
+            Divider()
+
+            Button("Template Explorer") { openWindow(id: "templates") }
+                .keyboardShortcut("t", modifiers: [.command, .option])
+
+            Button("Query History") { openWindow(id: "history") }
+                .keyboardShortcut("h", modifiers: [.command, .option])
         }
     }
 
-    private var currentServer: ConnectedServer? {
-        app.servers.first { $0.id == app.selectedTab?.sessionID } ?? app.servers.first
+    // MARK: - Helpers
+
+    private var currentServer: ConnectedServer? { app.currentServer }
+
+    private var currentDatabase: String? {
+        if let database = app.selectedTab?.database, !database.isEmpty { return database }
+        let info = currentServer?.serverInfo.currentDatabase
+        return (info?.isEmpty == false) ? info : nil
     }
 
     private var bindingActualPlan: Binding<Bool> {
@@ -167,6 +328,11 @@ struct AppCommands: Commands {
     private var bindingEstimatedPlan: Binding<Bool> {
         Binding(get: { app.selectedTab?.includeEstimatedPlan ?? false },
                 set: { app.selectedTab?.includeEstimatedPlan = $0 })
+    }
+
+    private var bindingClientStatistics: Binding<Bool> {
+        Binding(get: { app.selectedTab?.includeClientStatistics ?? false },
+                set: { app.selectedTab?.includeClientStatistics = $0 })
     }
 
     private func openScript() {

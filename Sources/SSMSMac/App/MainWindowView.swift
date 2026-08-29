@@ -9,7 +9,7 @@ struct MainWindowView: View {
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
-            ObjectExplorerView(model: app.explorer)
+            sidebar
                 .navigationSplitViewColumnWidth(min: 240, ideal: 300, max: 520)
         } detail: {
             detail
@@ -19,6 +19,21 @@ struct MainWindowView: View {
         }
         .task {
             if app.servers.isEmpty { app.activeSheet = .connect }
+        }
+    }
+
+    /// The Object Explorer, with the F7 details list underneath when it is showing.
+    @ViewBuilder
+    private var sidebar: some View {
+        if app.showExplorerDetails {
+            VSplitView {
+                ObjectExplorerView(model: app.explorer)
+                    .frame(minHeight: 180)
+                ObjectExplorerDetailsView(model: app.explorer)
+                    .frame(minHeight: 140, idealHeight: 220)
+            }
+        } else {
+            ObjectExplorerView(model: app.explorer)
         }
     }
 
@@ -105,50 +120,115 @@ struct MainWindowView: View {
             Button("Close Others") {
                 for other in app.tabs where other.id != tab.id { app.closeTab(other) }
             }
+            Divider()
+            Button("Query Options…") { app.activeSheet = .queryOptions(tab.id) }
         }
     }
 
-    @ViewBuilder
-    private func sheetContent(_ sheet: AppState.AppSheet) -> some View {
+    /// Type-erased on purpose. This switch has close to thirty arms, and letting
+    /// `ViewBuilder` build a nested `_ConditionalContent` tree that deep is what made the
+    /// type checker time out on CI before. One `AnyView` per sheet presentation costs
+    /// nothing measurable.
+    private func sheetContent(_ sheet: AppState.AppSheet) -> AnyView {
+        func wrap<Content: View>(_ content: Content) -> AnyView { AnyView(content) }
+        /// Every server-scoped sheet needs its `ConnectedServer`; a stale id just shows
+        /// nothing rather than crashing.
+        func withServer(_ id: UUID,
+                        _ make: (ConnectedServer) -> AnyView) -> AnyView {
+            guard let server = app.server(id: id) else { return AnyView(EmptyView()) }
+            return make(server)
+        }
+        func withTab(_ id: UUID, _ make: (QueryTab) -> AnyView) -> AnyView {
+            guard let tab = app.tabs.first(where: { $0.id == id }) else {
+                return AnyView(EmptyView())
+            }
+            return make(tab)
+        }
+
         switch sheet {
         case .connect:
-            ConnectSheet()
+            return wrap(ConnectSheet())
         case .activityMonitor(let serverID):
-            if let server = app.server(id: serverID) {
-                ActivityMonitorView(server: server)
-            }
+            return withServer(serverID) { wrap(ActivityMonitorView(server: $0)) }
         case .databaseProperties(let serverID, let database):
-            if let server = app.server(id: serverID) {
-                DatabasePropertiesView(server: server, database: database)
+            return withServer(serverID) {
+                wrap(DatabasePropertiesView(server: $0, database: database))
             }
         case .tableProperties(let serverID, let database, let schema, let table):
-            if let server = app.server(id: serverID) {
-                TablePropertiesView(server: server, database: database, schema: schema, table: table)
+            return withServer(serverID) {
+                wrap(TablePropertiesView(server: $0, database: database,
+                                         schema: schema, table: table))
             }
         case .backup(let serverID, let database):
-            if let server = app.server(id: serverID) {
-                BackupSheet(server: server, database: database)
-            }
+            return withServer(serverID) { wrap(BackupSheet(server: $0, database: database)) }
         case .restore(let serverID):
-            if let server = app.server(id: serverID) {
-                RestoreSheet(server: server)
-            }
+            return withServer(serverID) { wrap(RestoreSheet(server: $0)) }
         case .importFlatFile(let serverID, let database):
-            if let server = app.server(id: serverID) {
-                ImportFlatFileSheet(server: server, database: database)
+            return withServer(serverID) {
+                wrap(ImportFlatFileSheet(server: $0, database: database))
             }
         case .editData(let serverID, let database, let schema, let table):
-            if let server = app.server(id: serverID) {
-                DataEditorSheet(server: server, database: database, schema: schema, table: table)
+            return withServer(serverID) {
+                wrap(DataEditorSheet(server: $0, database: database, schema: schema, table: table))
             }
         case .indexMaintenance(let serverID, let database):
-            if let server = app.server(id: serverID) {
-                IndexMaintenanceView(server: server, database: database)
+            return withServer(serverID) {
+                wrap(IndexMaintenanceView(server: $0, database: database))
             }
         case .scriptPreview(let title, let sql):
-            ScriptPreviewSheet(title: title, sql: sql)
+            return wrap(ScriptPreviewSheet(title: title, sql: sql))
+        case .executionPlan(let title, let xml):
+            return wrap(PlanPreviewSheet(title: title, xml: xml))
         case .exportResults:
-            EmptyView()
+            return AnyView(EmptyView())
+
+        // Object and server management
+        case .serverProperties(let serverID):
+            return withServer(serverID) { wrap(ServerPropertiesView(server: $0)) }
+        case .newDatabase(let serverID):
+            return withServer(serverID) { wrap(NewDatabaseSheet(server: $0)) }
+        case .attachDatabase(let serverID):
+            return withServer(serverID) { wrap(AttachDatabaseSheet(server: $0)) }
+        case .detachDatabase(let serverID, let database):
+            return withServer(serverID) {
+                wrap(DetachDatabaseSheet(server: $0, database: database))
+            }
+        case .shrinkDatabase(let serverID, let database):
+            return withServer(serverID) {
+                wrap(ShrinkDatabaseSheet(server: $0, database: database))
+            }
+        case .renameObject(let serverID, let node):
+            return withServer(serverID) { wrap(RenameObjectSheet(server: $0, node: node)) }
+        case .deleteObject(let serverID, let node):
+            return withServer(serverID) { wrap(DeleteObjectSheet(server: $0, node: node)) }
+        case .dependencies(let serverID, let node):
+            return withServer(serverID) { wrap(DependenciesView(server: $0, node: node)) }
+        case .permissions(let serverID, let node):
+            return withServer(serverID) { wrap(PermissionsView(server: $0, node: node)) }
+        case .generateScripts(let serverID, let database):
+            return withServer(serverID) {
+                wrap(GenerateScriptsSheet(server: $0, database: database))
+            }
+
+        // Monitoring
+        case .serverLog(let serverID):
+            return withServer(serverID) { wrap(ServerLogView(server: $0)) }
+        case .agentJob(let serverID, let jobID):
+            return withServer(serverID) { wrap(AgentJobView(server: $0, initialJobID: jobID)) }
+        case .queryStore(let serverID, let database):
+            return withServer(serverID) { wrap(QueryStoreView(server: $0, database: database)) }
+        case .serverDashboard(let serverID):
+            return withServer(serverID) { wrap(ServerDashboardView(server: $0)) }
+
+        // Query window
+        case .queryOptions(let tabID):
+            return withTab(tabID) { wrap(QueryOptionsSheet(tab: $0)) }
+        case .templateParameters(let tabID):
+            return withTab(tabID) { wrap(TemplateParametersSheet(tab: $0)) }
+        case .goToLine(let tabID):
+            return withTab(tabID) { wrap(GoToLineSheet(tab: $0)) }
+        case .multiServerQuery(let tabID):
+            return withTab(tabID) { wrap(MultiServerQuerySheet(tab: $0)) }
         }
     }
 }

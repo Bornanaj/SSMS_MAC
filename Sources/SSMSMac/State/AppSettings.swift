@@ -31,6 +31,11 @@ final class AppSettings: ObservableObject {
     @AppStorage("editTopRows") var editTopRows: Int = 200
     @AppStorage("restoreTabsOnLaunch") var restoreTabsOnLaunch: Bool = true
 
+    /// "grid", "text" or "file" — the Results To setting new query windows inherit.
+    @AppStorage("resultsDestination") var resultsDestinationRaw: String = "grid"
+    @AppStorage("textResultsMaxColumnWidth") var textResultsMaxColumnWidth: Int = 256
+    @AppStorage("textResultsColumnSeparator") var textResultsColumnSeparator: String = " "
+
     var editorFont: NSFont {
         NSFont(name: editorFontName, size: editorFontSize)
             ?? .monospacedSystemFont(ofSize: editorFontSize, weight: .regular)
@@ -47,6 +52,20 @@ final class AppSettings: ObservableObject {
         case "dark": return .dark
         default: return nil
         }
+    }
+
+    var defaultResultsDestination: ResultsDestination {
+        ResultsDestination(rawValue: resultsDestinationRaw) ?? .grid
+    }
+
+    /// Text-results rendering, shared by the Results pane and Save Results As.
+    var textResultOptions: TextResultOptions {
+        var options = TextResultOptions()
+        options.maxColumnWidth = max(1, textResultsMaxColumnWidth)
+        options.columnSeparator = textResultsColumnSeparator.isEmpty
+            ? " " : textResultsColumnSeparator
+        options.nullText = gridNullText
+        return options
     }
 
     /// SET options applied to every new query connection.

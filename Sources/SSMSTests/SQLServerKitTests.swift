@@ -2,7 +2,9 @@ import Foundation
 import TDSKit
 import SQLServerKit
 
-func runSQLServerKitTests(_ t: TestRunner) -> Int32 {
+/// The kit suites. `extra` runs after them and before the summary, so a caller can add
+/// suites without every file having to know about `TestRunner.finish()`.
+func runSQLServerKitTests(_ t: TestRunner, extra: (TestRunner) -> Void = { _ in }) -> Int32 {
 
     t.suite("lexer") {
         let lexer = TSQLLexer()
@@ -201,6 +203,8 @@ func runSQLServerKitTests(_ t: TestRunner) -> Int32 {
         t.equal(TDSValue.bool(true).sqlLiteral, "1", "bit literal")
         t.equal(TDSValue.int(-42).sqlLiteral, "-42", "int literal")
     }
+
+    extra(t)
 
     return t.finish()
 }

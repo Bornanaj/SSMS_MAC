@@ -238,6 +238,39 @@ struct TablePropertiesView: View {
     }
 }
 
+/// A stored showplan shown in the same operator tree the query window uses. Query Store
+/// keeps plans for queries that are long finished, so this is the only way to see them.
+struct PlanPreviewSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let title: String
+    let xml: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Image(systemName: "point.topleft.down.curvedto.point.bottomright.up")
+                    .foregroundStyle(.tint)
+                Text(title).font(.headline)
+                Spacer()
+            }
+            .padding(12)
+            Divider()
+            ExecutionPlanView(xml: xml)
+            Divider()
+            HStack {
+                Button("Copy Plan XML") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(xml, forType: .string)
+                }
+                Spacer()
+                Button("Close") { dismiss() }.keyboardShortcut(.defaultAction)
+            }
+            .padding(12)
+        }
+        .frame(width: 900, height: 620)
+    }
+}
+
 /// Two-column label/value grid used by the property sheets.
 struct PropertyGrid: View {
     let rows: [(String, String)]

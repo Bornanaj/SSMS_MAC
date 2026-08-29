@@ -78,11 +78,24 @@ struct SQLEditorView: NSViewRepresentable {
             context.coordinator.highlightAll()
         }
 
+        // Go To Line and the bookmark commands move the caret on the model; the text view
+        // has to follow, but only when it is not the thing that moved it.
+        if !context.coordinator.isEditing,
+           tab.selectedRange.location != textView.selectedRange().location
+            || tab.selectedRange.length != textView.selectedRange().length {
+            let length = (textView.string as NSString).length
+            let location = min(tab.selectedRange.location, length)
+            let span = min(tab.selectedRange.length, length - location)
+            textView.setSelectedRange(NSRange(location: location, length: span))
+            textView.scrollRangeToVisible(NSRange(location: location, length: 0))
+        }
+
         scrollView.rulersVisible = settings.editorShowLineNumbers
         context.coordinator.applyAppearance(to: textView, ruler: context.coordinator.ruler, scrollView: scrollView)
         context.coordinator.ruler?.errorLines = Set(tab.messages
             .filter { $0.kind == .error && $0.scriptLine > 0 }
             .map(\.scriptLine))
+        context.coordinator.ruler?.bookmarkedLines = tab.bookmarkedLines
     }
 
     // MARK: - Coordinator

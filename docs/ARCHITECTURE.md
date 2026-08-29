@@ -88,3 +88,62 @@ with a small assertion harness, and it exits non-zero on failure so CI can use i
 `ssms-mac --selftest` runs the app's own models — `AppState`, `ObjectExplorerModel`,
 `QueryTab`, `ResultSetModel` — against a live server without a window, covering the exact
 code path the SwiftUI views bind to.
+
+## Admin work gets its own connection
+
+The Object Explorer shares one metadata connection per session, because a tree expansion is
+a short read and a fresh login per folder would be visible. Administration is the opposite:
+`DBCC CHECKDB`, `BACKUP`, `DBCC SHRINKFILE` and `sp_configure` all run long, and TDS has no
+multiplexing, so any of them on the shared connection would freeze the tree.
+
+`AdminRunner` draws the line. Its `read` goes through the shared connection; its `run` and
+`runCollectingMessages` open a connection, use it and close it. `runCollectingMessages`
+exists because DBCC and the detach/shrink procedures report their results as info tokens
+rather than as result sets, so the caller needs the message stream rather than rows.
+
+## Some SQL cannot be parameterised, so it is validated instead
+
+TDS has no way to parameterise an identifier, a permission name or a collation. Those
+values reach a statement as text, so each one is checked against what SQL Server actually
+accepts rather than escaped and hoped for:
+
+- Identifiers go through `SQLIdentifier.quote`, which doubles closing brackets.
+- String literals go through `SQLIdentifier.literal`, which doubles quotes.
+- A permission name has to be letters and single spaces (`VIEW DEFINITION`,
+  `ALTER ANY SCHEMA`); anything else is rejected, so `SELECT; DROP TABLE x` can never
+  become a `GRANT`.
+- A collation name has to be letters, digits and underscores.
+- A `sp_configure` option name is matched against `sys.configurations` before it is used,
+  and its value against that row's minimum and maximum.
+- An Agent job id is parsed as a `UUID` before it goes anywhere near `sp_start_job`.
+
+The regression suite pins each of these, including the rejections.
+
+## Generate Scripts orders by tier, then topologically inside the tier
+
+A script that creates a view before the view it selects from does not run. Ordering the
+whole database topologically is overkill, though: kinds already imply most of the order —
+schemas and types first, then tables, then functions, views and procedures, then triggers.
+
+`ScriptProject.ordered` ranks by kind and only runs a topological sort *inside* a rank,
+using `sys.sql_expression_dependencies` for the edges. Cross-rank edges are already
+satisfied by the ranking, so they are dropped. Two procedures that call each other — which
+SQL Server allows — form a cycle; the sort emits the whole cycle in alphabetical order
+rather than dropping either one, because a missing object is a worse outcome than a
+statement that has to be re-run.
+
+Foreign keys need no ordering at all: `ScriptGenerator` emits them as `ALTER TABLE` after
+every table exists.
+
+## Agent stores times and durations as decimal-packed integers
+
+`msdb.dbo.sysschedules.active_start_time` is the integer `HHMMSS`, so 2 AM is `20000`, and
+`sysjobhistory.run_duration` is `HHMMSS` too — `13045` is an hour and a half, not thirteen
+thousand seconds. Reading either as a count of seconds is wrong by a factor that looks
+plausible, which is exactly the kind of bug that survives review, so
+`AgentScheduleFormatter` owns the conversions and the suite pins them.
+
+The frequency columns are a small bitfield language on top of that: a weekly schedule packs
+its days into a mask starting at Sunday = 1, and a "monthly relative" schedule carries both
+an ordinal (`freq_relative_interval`) and a weekday (`freq_interval`). All of it is decoded
+in one pure function so it can be tested without an Agent.

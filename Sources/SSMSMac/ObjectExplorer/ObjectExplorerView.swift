@@ -53,6 +53,13 @@ struct ObjectExplorerView: View {
                 .buttonStyle(.plain)
                 .help("Show system objects")
 
+                Toggle(isOn: $app.showExplorerDetails) {
+                    Image(systemName: "list.bullet.rectangle")
+                }
+                .toggleStyle(.button)
+                .buttonStyle(.plain)
+                .help("Object Explorer Details (⌘7)")
+
                 Spacer()
             }
             .padding(.horizontal, 8)

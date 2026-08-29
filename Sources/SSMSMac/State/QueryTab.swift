@@ -5,6 +5,7 @@ import SQLServerKit
 
 enum ResultsPaneTab: String, CaseIterable, Identifiable {
     case results
+    case textResults
     case messages
     case executionPlan
     case clientStatistics
@@ -14,6 +15,7 @@ enum ResultsPaneTab: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .results: return "Results"
+        case .textResults: return "Text"
         case .messages: return "Messages"
         case .executionPlan: return "Execution plan"
         case .clientStatistics: return "Client statistics"
@@ -23,9 +25,35 @@ enum ResultsPaneTab: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .results: return "tablecells"
+        case .textResults: return "text.justify.left"
         case .messages: return "text.alignleft"
         case .executionPlan: return "point.topleft.down.curvedto.point.bottomright.up"
         case .clientStatistics: return "chart.bar"
+        }
+    }
+}
+
+/// SSMS's Results To choice: a grid, fixed-width text, or straight to a file.
+enum ResultsDestination: String, CaseIterable, Identifiable {
+    case grid
+    case text
+    case file
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .grid: return "Results to Grid"
+        case .text: return "Results to Text"
+        case .file: return "Results to File"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .grid: return "tablecells"
+        case .text: return "text.justify.left"
+        case .file: return "doc.badge.arrow.up"
         }
     }
 }
@@ -42,6 +70,8 @@ final class QueryTab: ObservableObject, Identifiable {
     @Published var isDirty = false
     @Published var fileURL: URL?
     @Published var selectedRange = NSRange(location: 0, length: 0)
+    /// Lines the user bookmarked with ⌘K ⌘K, one-based like the ruler.
+    @Published var bookmarkedLines: Set<Int> = []
 
     @Published private(set) var sessionID: UUID?
     @Published private(set) var sessionName: String = "Not connected"
@@ -65,6 +95,12 @@ final class QueryTab: ObservableObject, Identifiable {
     @Published var includeEstimatedPlan = false
     @Published var includeClientStatistics = false
 
+    /// Where finished results go. `.text` and `.file` both render through
+    /// `TextResultFormatter`; `.file` additionally writes what it rendered.
+    @Published var resultsDestination: ResultsDestination = .grid
+    @Published private(set) var textResults: String = ""
+    @Published var textResultOptions = TextResultOptions()
+
     @Published private(set) var completionItems: [CompletionItem] = []
     private var intelliSense: IntelliSenseProvider?
     private var completionTask: Task<Void, Never>?
@@ -76,10 +112,19 @@ final class QueryTab: ObservableObject, Identifiable {
     private var executionTask: Task<Void, Never>?
     private var elapsedTimer: Timer?
     private var resultsByID: [UUID: ResultSetModel] = [:]
+    private var lastExecutedScript = ""
 
-    var maxRows: Int = 0
-    var timeoutSeconds: Int = 0
-    var setOptions = QuerySetOptions()
+    /// Execution limits and SET options. Published because the Query Options sheet binds
+    /// straight into them.
+    @Published var maxRows: Int = 0
+    @Published var timeoutSeconds: Int = 0
+    @Published var setOptions = QuerySetOptions()
+
+    /// Called on the main actor once an execution finishes, so `AppState` can record the
+    /// statement in the query history without this type knowing about it.
+    var onExecutionFinished: ((QueryTab) -> Void)?
+    /// Asks the host for a file to write text results into. Returns nil when cancelled.
+    var requestResultsFile: ((QueryTab, String) -> Void)?
 
     init(title: String = "SQLQuery1.sql", text: String = "") {
         self.title = title
@@ -100,6 +145,9 @@ final class QueryTab: ObservableObject, Identifiable {
         guard selectedRange.location + selectedRange.length <= ns.length else { return text }
         return ns.substring(with: selectedRange)
     }
+
+    /// The script the last execution ran, for the history entry.
+    var executedScript: String { lastExecutedScript }
 
     // MARK: - Connection
 
@@ -211,9 +259,10 @@ final class QueryTab: ObservableObject, Identifiable {
         guard !script.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
 
         clearResults()
+        lastExecutedScript = script
         isExecuting = true
         showResultsPane = true
-        selectedPaneTab = .results
+        selectedPaneTab = resultsDestination == .grid ? .results : .textResults
         statusText = "Executing query…"
         startTimer()
 
@@ -222,6 +271,7 @@ final class QueryTab: ObservableObject, Identifiable {
         options.timeoutSeconds = timeoutSeconds
         options.includeActualExecutionPlan = includeActualPlan
         options.includeEstimatedExecutionPlan = includeEstimatedPlan
+        options.includeClientStatistics = includeClientStatistics
         options.setOptions = setOptions
         options.database = database.isEmpty ? nil : database
 
@@ -309,6 +359,31 @@ final class QueryTab: ObservableObject, Identifiable {
         } else {
             statusText = "Query finished."
         }
+
+        if resultsDestination != .grid {
+            renderTextResults()
+            if resultsDestination == .file, !textResults.isEmpty {
+                requestResultsFile?(self, textResults)
+            }
+        }
+        onExecutionFinished?(self)
+    }
+
+    /// Builds the Results-to-Text output for every result set that came back.
+    func renderTextResults() {
+        let formatter = TextResultFormatter(options: textResultOptions)
+        var out = ""
+        for model in resultSets {
+            if resultSets.count > 1 {
+                out += "-- Result set \(model.ordinal)\n"
+            }
+            out += formatter.format(columns: model.columns, rows: model.rows)
+            out += "\n"
+        }
+        for message in messages {
+            out += message.displayText + "\n"
+        }
+        textResults = out
     }
 
     private func clearResults() {
@@ -316,6 +391,7 @@ final class QueryTab: ObservableObject, Identifiable {
         resultsByID.removeAll()
         messages.removeAll()
         executionPlanXML = nil
+        textResults = ""
         summary = nil
         elapsed = 0
     }
@@ -343,5 +419,75 @@ final class QueryTab: ObservableObject, Identifiable {
     var elapsedText: String {
         let total = Int(elapsed)
         return String(format: "%02d:%02d:%02d", total / 3600, (total % 3600) / 60, total % 60)
+    }
+
+    // MARK: - Caret and bookmarks
+
+    /// One-based line number of the caret.
+    var caretLine: Int {
+        QueryTab.line(at: selectedRange.location, in: text)
+    }
+
+    /// One-based column of the caret.
+    var caretColumn: Int {
+        let ns = text as NSString
+        let location = min(selectedRange.location, ns.length)
+        let lineRange = ns.lineRange(for: NSRange(location: location, length: 0))
+        return location - lineRange.location + 1
+    }
+
+    static func line(at offset: Int, in text: String) -> Int {
+        let ns = text as NSString
+        let location = min(max(0, offset), ns.length)
+        var line = 1
+        ns.enumerateSubstrings(in: NSRange(location: 0, length: location),
+                               options: [.byLines, .substringNotRequired]) { _, _, _, _ in
+            line += 1
+        }
+        return line
+    }
+
+    /// The character offset the given one-based line starts at.
+    static func offset(ofLine line: Int, in text: String) -> Int {
+        let ns = text as NSString
+        var current = 1
+        var offset = 0
+        while current < line && offset < ns.length {
+            let lineRange = ns.lineRange(for: NSRange(location: offset, length: 0))
+            offset = NSMaxRange(lineRange)
+            current += 1
+        }
+        return min(offset, ns.length)
+    }
+
+    func moveCaret(toLine line: Int) {
+        let clamped = max(1, line)
+        selectedRange = NSRange(location: QueryTab.offset(ofLine: clamped, in: text), length: 0)
+    }
+
+    func toggleBookmark() {
+        let line = caretLine
+        if bookmarkedLines.contains(line) {
+            bookmarkedLines.remove(line)
+        } else {
+            bookmarkedLines.insert(line)
+        }
+    }
+
+    func clearBookmarks() { bookmarkedLines.removeAll() }
+
+    /// Wraps to the first bookmark when the caret is past the last one, like SSMS does.
+    func goToNextBookmark() {
+        guard !bookmarkedLines.isEmpty else { return }
+        let current = caretLine
+        let sorted = bookmarkedLines.sorted()
+        moveCaret(toLine: sorted.first { $0 > current } ?? sorted[0])
+    }
+
+    func goToPreviousBookmark() {
+        guard !bookmarkedLines.isEmpty else { return }
+        let current = caretLine
+        let sorted = bookmarkedLines.sorted()
+        moveCaret(toLine: sorted.last { $0 < current } ?? sorted[sorted.count - 1])
     }
 }

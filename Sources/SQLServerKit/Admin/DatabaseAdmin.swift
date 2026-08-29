@@ -686,6 +686,31 @@ public struct DatabaseAdmin: Sendable {
         try await run("ALTER INDEX ALL ON \(target) REBUILD\(options);", database: database)
     }
 
+    /// One index rather than all of them, which is what the index context menu asks for.
+    public func rebuildIndex(database: String,
+                             schema: String,
+                             table: String,
+                             index: String,
+                             online: Bool) async throws {
+        let target = SQLIdentifier.quote(schema: schema, name: table)
+        let options = online ? " WITH (ONLINE = ON)" : ""
+        try await run("ALTER INDEX \(SQLIdentifier.quote(index)) ON \(target) REBUILD\(options);",
+                      database: database)
+    }
+
+    /// Disabling an index keeps its definition but drops its data; re-enabling it needs a
+    /// rebuild, which is what SQL Server requires and what this emits.
+    public func setIndexEnabled(database: String,
+                                schema: String,
+                                table: String,
+                                index: String,
+                                enabled: Bool) async throws {
+        let target = SQLIdentifier.quote(schema: schema, name: table)
+        let statement = enabled ? "REBUILD" : "DISABLE"
+        try await run("ALTER INDEX \(SQLIdentifier.quote(index)) ON \(target) \(statement);",
+                      database: database)
+    }
+
     public func reorganizeIndex(database: String,
                                 schema: String,
                                 table: String,

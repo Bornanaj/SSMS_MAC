@@ -1,13 +1,18 @@
 import AppKit
 
-/// Gutter with line numbers, and a marker in the margin for lines that produced an error.
+/// Gutter with line numbers, a marker in the margin for lines that produced an error,
+/// and the bookmark dots the Edit ▸ Bookmarks commands set.
 final class LineNumberRulerView: NSRulerView {
     weak var textView: NSTextView?
     var palette: Theme.SyntaxPalette = Theme.light
     var font: NSFont = .monospacedSystemFont(ofSize: 11, weight: .regular)
     /// 1-based line numbers that the server reported errors on.
     var errorLines: Set<Int> = [] {
-        didSet { needsDisplay = true }
+        didSet { if errorLines != oldValue { needsDisplay = true } }
+    }
+    /// 1-based line numbers the user bookmarked.
+    var bookmarkedLines: Set<Int> = [] {
+        didSet { if bookmarkedLines != oldValue { needsDisplay = true } }
     }
 
     init(textView: NSTextView) {
@@ -71,6 +76,17 @@ final class LineNumberRulerView: NSRulerView {
                 let y = lineRect.minY + inset - visibleRect.minY + (lineRect.height - size.height) / 2
                 let x = ruleThickness - size.width - 8
                 label.draw(at: NSPoint(x: x, y: y), withAttributes: isError ? errorAttributes : attributes)
+
+                // The bookmark dot goes in the left margin, clear of the digits.
+                if bookmarkedLines.contains(lineNumber) {
+                    let diameter: CGFloat = 7
+                    let dot = NSRect(x: 4,
+                                     y: y + (size.height - diameter) / 2,
+                                     width: diameter,
+                                     height: diameter)
+                    NSColor.systemBlue.setFill()
+                    NSBezierPath(ovalIn: dot).fill()
+                }
                 lineNumber += 1
             }
             glyphIndex = NSMaxRange(effectiveRange)

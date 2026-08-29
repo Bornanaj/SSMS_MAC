@@ -86,6 +86,7 @@ struct ResultsPaneView: View {
     private func enabled(_ paneTab: ResultsPaneTab) -> Bool {
         switch paneTab {
         case .results: return true
+        case .textResults: return true
         case .messages: return true
         case .executionPlan: return tab.executionPlanXML != nil
         case .clientStatistics: return tab.summary != nil
@@ -125,6 +126,9 @@ struct ResultsPaneView: View {
         case .messages:
             MessagesView(messages: tab.messages, onSelectLine: onJumpToLine)
 
+        case .textResults:
+            textResults
+
         case .executionPlan:
             if let xml = tab.executionPlanXML {
                 ExecutionPlanView(xml: xml)
@@ -134,6 +138,47 @@ struct ResultsPaneView: View {
 
         case .clientStatistics:
             clientStatistics
+        }
+    }
+
+    /// Results to Text: the same fixed-width rendering that Results to File writes out.
+    @ViewBuilder
+    private var textResults: some View {
+        if tab.textResults.isEmpty {
+            ContentUnavailableView("No text results", systemImage: "text.justify.left",
+                                   description: Text(tab.resultsDestination == .grid
+                                       ? "Switch Results To to Text, or press Re-render."
+                                       : "Execute a query to see its text output."))
+        } else {
+            VStack(spacing: 0) {
+                HStack(spacing: 8) {
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(tab.textResults, forType: .string)
+                    } label: {
+                        Label("Copy", systemImage: "doc.on.doc")
+                    }
+                    .buttonStyle(.plain)
+                    Button {
+                        tab.renderTextResults()
+                    } label: {
+                        Label("Re-render", systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(.plain)
+                    Spacer()
+                }
+                .font(.caption)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                Divider()
+                ScrollView([.horizontal, .vertical]) {
+                    Text(tab.textResults)
+                        .font(Font(settings.gridFont))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(8)
+                }
+            }
         }
     }
 

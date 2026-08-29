@@ -93,6 +93,25 @@ struct QueryWindowView: View {
             }
             .help("Format the script")
 
+            Divider().frame(height: 16)
+
+            Picker("", selection: $tab.resultsDestination) {
+                ForEach(ResultsDestination.allCases) { destination in
+                    Label(destination.title, systemImage: destination.symbol)
+                        .tag(destination)
+                }
+            }
+            .labelsHidden()
+            .frame(width: 150)
+            .help("Where finished results go")
+
+            Button {
+                app.activeSheet = .queryOptions(tab.id)
+            } label: {
+                Image(systemName: "slider.horizontal.3")
+            }
+            .help("Query options")
+
             Spacer()
 
             if tab.isExecuting {
@@ -126,6 +145,9 @@ struct QueryWindowView: View {
             Text(tab.statusText)
                 .lineLimit(1)
             Spacer()
+            if !tab.bookmarkedLines.isEmpty {
+                Text("\(tab.bookmarkedLines.count) bookmark\(tab.bookmarkedLines.count == 1 ? "" : "s")")
+            }
             if !tab.serverLabel.isEmpty {
                 Text(tab.serverLabel)
             }
@@ -136,7 +158,7 @@ struct QueryWindowView: View {
             if let summary = tab.summary {
                 Text("\(summary.totalRows) rows").monospacedDigit()
             }
-            Text("Ln \(caretLine), Col \(caretColumn)").monospacedDigit()
+            Text("Ln \(tab.caretLine), Col \(tab.caretColumn)").monospacedDigit()
         }
         .font(.caption)
         .foregroundStyle(.secondary)
@@ -145,33 +167,7 @@ struct QueryWindowView: View {
         .background(accentBackground)
     }
 
-    private var caretLine: Int {
-        let text = tab.text as NSString
-        let location = min(tab.selectedRange.location, text.length)
-        var line = 1
-        text.enumerateSubstrings(in: NSRange(location: 0, length: location),
-                                 options: [.byLines, .substringNotRequired]) { _, _, _, _ in
-            line += 1
-        }
-        return line
-    }
-
-    private var caretColumn: Int {
-        let text = tab.text as NSString
-        let location = min(tab.selectedRange.location, text.length)
-        let lineRange = text.lineRange(for: NSRange(location: location, length: 0))
-        return location - lineRange.location + 1
-    }
-
     private func jump(toLine line: Int) {
-        let text = tab.text as NSString
-        var current = 1
-        var offset = 0
-        while current < line && offset < text.length {
-            let lineRange = text.lineRange(for: NSRange(location: offset, length: 0))
-            offset = NSMaxRange(lineRange)
-            current += 1
-        }
-        tab.selectedRange = NSRange(location: min(offset, text.length), length: 0)
+        tab.moveCaret(toLine: line)
     }
 }

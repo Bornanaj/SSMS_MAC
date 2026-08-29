@@ -11,7 +11,7 @@ struct SettingsView: View {
             executionTab.tabItem { Label("Execution", systemImage: "play") }
             appearanceTab.tabItem { Label("Appearance", systemImage: "paintbrush") }
         }
-        .frame(width: 520, height: 360)
+        .frame(width: 560, height: 420)
     }
 
     private var editorTab: some View {
@@ -34,15 +34,27 @@ struct SettingsView: View {
 
     private var gridTab: some View {
         Form {
-            TextField("Grid font", text: $settings.gridFontName)
-            Slider(value: $settings.gridFontSize, in: 9...20, step: 1) {
-                Text("Grid font size: \(Int(settings.gridFontSize))")
+            Section("Grid") {
+                TextField("Grid font", text: $settings.gridFontName)
+                Slider(value: $settings.gridFontSize, in: 9...20, step: 1) {
+                    Text("Grid font size: \(Int(settings.gridFontSize))")
+                }
+                TextField("Text shown for NULL", text: $settings.gridNullText)
+                TextField("Maximum rows kept in the grid",
+                          value: $settings.gridMaxRows, format: .number)
+                TextField("Maximum characters per cell",
+                          value: $settings.gridMaxCharsPerCell, format: .number)
             }
-            TextField("Text shown for NULL", text: $settings.gridNullText)
-            TextField("Maximum rows kept in the grid",
-                      value: $settings.gridMaxRows, format: .number)
-            TextField("Maximum characters per cell",
-                      value: $settings.gridMaxCharsPerCell, format: .number)
+            Section("Results to Text") {
+                Picker("New windows send results to", selection: $settings.resultsDestinationRaw) {
+                    Text("Grid").tag("grid")
+                    Text("Text").tag("text")
+                    Text("File").tag("file")
+                }
+                TextField("Maximum characters per column",
+                          value: $settings.textResultsMaxColumnWidth, format: .number)
+                TextField("Column separator", text: $settings.textResultsColumnSeparator)
+            }
         }
         .formStyle(.grouped)
         .padding()
