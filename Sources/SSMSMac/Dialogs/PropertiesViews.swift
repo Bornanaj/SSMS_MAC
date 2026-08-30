@@ -259,6 +259,40 @@ struct PropertyGrid: View {
     }
 }
 
+/// A stored showplan in the same operator tree the query window uses. Query Store keeps
+/// plans for queries that finished long ago, so this is the only way to look at them.
+struct PlanPreviewSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let title: String
+    let xml: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 10) {
+                Image(systemName: "point.topleft.down.curvedto.point.bottomright.up")
+                    .font(.title3)
+                    .foregroundStyle(.tint)
+                Text(title).font(.headline)
+                Spacer()
+            }
+            .padding(12)
+            Divider()
+            ExecutionPlanView(xml: xml)
+            Divider()
+            HStack {
+                Button("Copy Plan XML") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(xml, forType: .string)
+                }
+                Spacer()
+                Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)
+            }
+            .padding(12)
+        }
+        .frame(width: 920, height: 640)
+    }
+}
+
 /// Read-only preview of a generated script with copy / open-in-editor actions.
 struct ScriptPreviewSheet: View {
     @EnvironmentObject var app: AppState

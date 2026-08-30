@@ -37,17 +37,27 @@ enum ObjectExplorerActions {
         }
     }
 
+    /// The tree records an index's table under `parentTable`. Reading `table`, which
+    /// `MetadataService` never writes, made these two menu items do nothing at all.
+    private static func parentTable(of node: ObjectExplorerNode) -> String? {
+        if let table = node.info["parentTable"], !table.isEmpty { return table }
+        if let table = node.info["table"], !table.isEmpty { return table }
+        return nil
+    }
+
     static func rebuildIndex(node: ObjectExplorerNode, app: AppState) {
         guard let server = app.server(for: node),
               let database = node.database, let schema = node.schema,
-              let table = node.info["table"], let index = node.name else { return }
+              let table = parentTable(of: node), let index = node.name else {
+            app.statusMessage = "The parent table of this index is unknown."
+            return
+        }
         Task {
             let admin = DatabaseAdmin(session: server.session)
             do {
-                _ = index
-                try await admin.rebuildIndexes(database: database, schema: schema,
-                                               table: table, online: false)
-                app.statusMessage = "Rebuilt indexes on \(schema).\(table)."
+                try await admin.rebuildIndex(database: database, schema: schema,
+                                             table: table, index: index, online: false)
+                app.statusMessage = "Rebuilt \(index) on \(schema).\(table)."
             } catch {
                 app.statusMessage = "Rebuild failed: \(error)"
             }
@@ -57,7 +67,10 @@ enum ObjectExplorerActions {
     static func reorganizeIndex(node: ObjectExplorerNode, app: AppState) {
         guard let server = app.server(for: node),
               let database = node.database, let schema = node.schema,
-              let table = node.info["table"], let index = node.name else { return }
+              let table = parentTable(of: node), let index = node.name else {
+            app.statusMessage = "The parent table of this index is unknown."
+            return
+        }
         Task {
             let admin = DatabaseAdmin(session: server.session)
             do {

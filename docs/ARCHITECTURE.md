@@ -160,3 +160,55 @@ with a small assertion harness, and it exits non-zero on failure so CI can use i
 `ssms-mac --selftest` runs the app's own models — `AppState`, `ObjectExplorerModel`,
 `QueryTab`, `ResultSetModel` — against a live server without a window, covering the exact
 code path the SwiftUI views bind to.
+
+## The blocking tree is built on the client
+
+SQL Server can be asked for the blocking chain with a recursive CTE, and that was the first
+attempt. It produced a tree that disagreed with the process list next to it: the two
+queries run milliseconds apart, sessions come and go in between, and the operator ends up
+looking at a chain whose members are not in the grid above.
+
+`BlockingChain` builds the tree from the same `[ActivitySession]` the Processes tab is
+already showing, so the two can never diverge. That moves the fiddly parts to the client,
+which is where the tests can reach them:
+
+- A blocker that is not in the list — it disconnected, or it was filtered out as a system
+  session — becomes a placeholder root rather than swallowing its waiters.
+- A session that reports itself as its own blocker is a parallel query waiting on its own
+  sibling tasks. That is not a chain, so it is dropped rather than drawn as a self-loop.
+- A cycle is possible in a snapshot even though a real deadlock would have been resolved,
+  because the rows are not read atomically. Every member of a cycle is emitted as its own
+  root, so a loop can never make a blocked session invisible.
+
+## Query Store is the only place a finished query's plan still exists
+
+The plan cache evicts under memory pressure and on recompilation, so by the time anyone
+investigates a slow query it usually has no plan left. Query Store keeps both the plan and
+the runtime statistics per interval, which is why the reports are worth having even though
+the DMV-based ones in `ServerReports` cover similar ground.
+
+Two details shape `QueryStoreService`:
+
+- Durations are microseconds in `sys.query_store_runtime_stats`, and page counts are
+  counts. `QueryStoreMetric.isMicroseconds` decides the divisor rather than a magic 1000
+  scattered through the SQL.
+- The averages are weighted. `avg_duration` is per interval, so averaging the averages
+  would weight a quiet interval the same as a busy one. Every aggregate multiplies by
+  `count_executions` first and divides by the summed count at the end.
+
+Execution count has no meaningful regression form — it is a total, not an average — so the
+regressed-queries report falls back to duration for it instead of dividing a count by
+itself and reporting 1.
+
+## Some SQL cannot be parameterised, so it is validated instead
+
+TDS has no way to parameterise an identifier or a keyword. Those values reach a statement
+as text, so each one is checked against what SQL Server actually accepts rather than
+escaped and hoped for. `QueryStoreService.setStateScript` takes the operation mode as a
+string and refuses anything that is not `OFF`, `READ_ONLY` or `READ_WRITE`; the database
+name goes through `SQLIdentifier.quote`. The regression suite pins the rejections, not just
+the happy path.
+
+Azure SQL Database needs `ALTER DATABASE CURRENT` because it has no cross-database `ALTER`
+and no reachable `master`, so the script builder takes a flag for it and the caller decides
+from `ServerInfo`.

@@ -78,6 +78,9 @@ final class AppState: ObservableObject {
         case serverProperties(UUID)
         case registeredServers
         case exportData(UUID, String, String?, String?)
+        case queryStore(UUID, String?)
+        case errorLog(UUID)
+        case executionPlan(String, String)
 
         var id: String {
             switch self {
@@ -111,6 +114,9 @@ final class AppState: ObservableObject {
             case .registeredServers: return "registeredservers"
             case .exportData(let s, let d, let sc, let t):
                 return "exportdata-\(s)-\(d)-\(sc ?? "")-\(t ?? "")"
+            case .queryStore(let s, let d): return "querystore-\(s)-\(d ?? "")"
+            case .errorLog(let s): return "errorlog-\(s)"
+            case .executionPlan(let title, _): return "plan-\(title)"
             }
         }
     }

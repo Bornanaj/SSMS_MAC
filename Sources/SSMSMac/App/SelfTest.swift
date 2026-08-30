@@ -160,7 +160,70 @@ enum SelfTest {
         check("completions available", !tab.completionItems.isEmpty,
               tab.completionItems.prefix(6).map(\.label).joined(separator: ", "))
 
-        // 9. Tear down
+        // 9. Blocking chains, built from the process list rather than queried separately
+        let monitor = ActivityMonitor(session: server.session)
+        if let sessions = try? await monitor.sessions(includeSystem: true) {
+            let rows = BlockingChain.rows(from: BlockingChain.build(from: sessions))
+            let waiters = Set(sessions
+                .filter { $0.isBlocked && $0.blockingSessionID != $0.sessionID }
+                .map(\.sessionID))
+            let reported = Set(rows.map(\.session.sessionID))
+            check("blocking chain covers every waiter", waiters.isSubset(of: reported),
+                  "\(waiters.count) blocked of \(sessions.count) sessions, \(rows.count) rows")
+        } else {
+            check("blocking chain covers every waiter", false, "could not read the sessions")
+        }
+
+        // 10. Query Store. It is off by default, so an empty report is a pass; what has to
+        // work is reading the settings without an error.
+        let queryStore = QueryStoreService(session: server.session)
+        if server.serverInfo.supportsQueryStore {
+            do {
+                let options = try await queryStore.options(database: "ShopDemo")
+                check("query store settings", true,
+                      "\(options.actualState), capture \(options.captureMode), "
+                        + String(format: "%.0f of %.0f MB",
+                                 options.currentStorageMB, options.maxStorageMB))
+                if options.isEnabled {
+                    let top = try await queryStore.topQueries(database: "ShopDemo", hours: 168)
+                    print("[INFO] query store — \(top.count) queries in the last week")
+                }
+            } catch {
+                check("query store settings", false, String(describing: error))
+            }
+        } else {
+            print("[SKIP] query store — needs SQL Server 2016 or later")
+        }
+
+        // 11. The error log needs securityadmin, so a plain login is allowed to skip it.
+        if let entries = try? await ErrorLogService(session: server.session).entries(limit: 50) {
+            let errors = entries.filter { $0.severity == .error }.count
+            print("[INFO] error log — \(entries.count) lines, \(errors) flagged as errors")
+        } else {
+            print("[SKIP] error log — sp_readerrorlog is not permitted for this login")
+        }
+
+        // 12. Scripting the kinds that have no sys.sql_modules body
+        let generator = ScriptGenerator(session: server.session)
+        let synonymNode = ObjectExplorerNode(id: "selftest/synonym", kind: .synonym,
+                                             label: "dbo.NoSuchSynonym", iconName: "link",
+                                             isExpandable: false, database: "ShopDemo",
+                                             schema: "dbo", name: "NoSuchSynonym")
+        do {
+            _ = try await generator.script(node: synonymNode, action: .create,
+                                           options: ScriptOptions())
+            check("synonym scripting reaches the catalog", true, "an actual synonym exists")
+        } catch let error as SQLServerError {
+            // Not found is the right answer for a synonym that does not exist; the point is
+            // that the scripter routed the kind instead of refusing it outright.
+            let message = String(describing: error)
+            check("synonym scripting is routed, not refused",
+                  !message.contains("not supported"), message)
+        } catch {
+            check("synonym scripting is routed, not refused", false, String(describing: error))
+        }
+
+        // 13. Tear down
         let tabCountBefore = app.tabs.count
         app.closeTab(tab)
         check("tab closed", app.tabs.count == tabCountBefore - 1,

@@ -7,8 +7,8 @@
 
 A native macOS SQL Server client in the shape of SQL Server Management Studio:
 Object Explorer, a T-SQL editor with IntelliSense, a results grid, execution plans,
-scripting, an editable data grid, activity monitoring, backup/restore and flat-file
-import.
+scripting, an editable data grid, activity monitoring, backup/restore, flat-file import,
+Standard Reports, Query Store and the error log viewer.
 
 It talks to SQL Server directly. There is **no ODBC driver, FreeTDS, Docker container
 or JVM to install** — the TDS 7.4 protocol is implemented in Swift inside this repo.
@@ -99,6 +99,9 @@ swift build -c release          # libraries and executables
 - Lazy expansion, one round trip per folder, name filter, system‑object toggle
 - Context menus: Select Top 1000 Rows, Edit Top 200 Rows, Script as
   CREATE/ALTER/DROP/SELECT/INSERT/UPDATE/DELETE, Properties, Refresh
+- Scripting also covers the kinds with no `sys.sql_modules` body: synonyms, sequences,
+  user-defined data and table types, schemas, users, roles, logins, partition functions
+  and schemes, and XML schema collections
 
 **Query editor**
 - T‑SQL syntax colouring, line numbers, current‑line highlight
@@ -125,11 +128,22 @@ swift build -c release          # libraries and executables
   Parameters" dialog (⇧⌘M)
 
 **Administration**
-- Activity Monitor: processes, blocking, resource waits, expensive queries, file I/O, KILL
+- Activity Monitor: processes, resource waits, expensive queries, file I/O, KILL, plus a
+  Blocking tab that arranges the waiters into chains and names the head of the worst one
 - Database and table properties, index fragmentation with rebuild/reorganize
 - Backup and restore script generation, `RESTORE HEADERONLY` / `FILELISTONLY` inspection
 - Attach, detach, shrink and disk usage, each showing its script first
 - Import Flat File with delimiter sniffing, encoding detection and type inference
+
+**Monitoring**
+- Reports: 18 of SSMS's Standard Reports, from the server dashboard to missing indexes
+- Query Store: top resource consumers by seven metrics, regressed queries against a
+  baseline window, forced plans with their failure reason, plan forcing and unforcing, and
+  the stored showplan opened in the operator tree — which is the only way to see the plan
+  for a query that finished hours ago
+- SQL Server and SQL Agent error logs through `sp_readerrorlog`, with archive selection,
+  server-side filtering and a severity column inferred from the wording
+- SQL Server Agent: jobs, steps, schedules as sentences, history, start/stop/enable
 
 ## Data fidelity
 
@@ -153,7 +167,7 @@ into mojibake.
 ## Testing
 
 ```bash
-swift run ssms-tests          # 120 offline regression checks, no server needed
+swift run ssms-tests          # 222 offline regression checks, no server needed
 swift run tdscli all          # service smoke tests against a live server
 ./.build/debug/ssms-mac --selftest   # drives the real UI models end to end
 ```
@@ -178,6 +192,10 @@ docker run -d --platform linux/amd64 --name ssms-mac-test \
 - The execution plan is a cost‑annotated operator tree, not the SSMS graphical canvas.
 - Always On, Replication, Service Broker and SQL Agent job editing are not implemented;
   SQL Agent jobs are listed but not editable.
+- The error log viewer needs membership of `securityadmin`, because that is what
+  `sp_readerrorlog` requires. It reports the permission error rather than an empty log.
+- Query Store needs SQL Server 2016 or later, and the reports stay empty until the first
+  collection interval closes after switching it on.
 
 ## Contributing
 

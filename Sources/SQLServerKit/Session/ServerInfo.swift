@@ -74,6 +74,7 @@ public struct ServerInfo: Sendable, Hashable, Codable {
     public var supportsSequences: Bool { majorVersion >= 11 || isAzure }
     public var supportsResumableIndexes: Bool { majorVersion >= 14 || isAzure }
     public var supportsLedger: Bool { majorVersion >= 16 || isAzureSQLDatabase }
+    public var supportsQueryStore: Bool { majorVersion >= 13 || isAzure }
 
     public static let query = """
     SELECT

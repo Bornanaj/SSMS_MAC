@@ -39,6 +39,9 @@ struct ObjectExplorerMenu: View {
         Button("SQL Server Agent Jobs…") {
             if let server = app.server(for: node) { app.activeSheet = .agentJobs(server.id) }
         }
+        Button("SQL Server Logs…") {
+            if let server = app.server(for: node) { app.activeSheet = .errorLog(server.id) }
+        }
         Button("Logins…") {
             if let server = app.server(for: node) { app.activeSheet = .logins(server.id) }
         }
@@ -125,6 +128,11 @@ struct ObjectExplorerMenu: View {
         Button("Reports…") {
             if let server = app.server(for: node), let name = node.name {
                 app.activeSheet = .reports(server.id, name)
+            }
+        }
+        Button("Query Store…") {
+            if let server = app.server(for: node), let name = node.name {
+                app.activeSheet = .queryStore(server.id, name)
             }
         }
         Divider()

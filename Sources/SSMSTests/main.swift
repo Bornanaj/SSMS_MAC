@@ -210,4 +210,4 @@ t.suite("packet framing") {
     }
 }
 
-exit(runSQLServerKitTests(t))
+exit(runSQLServerKitTests(t, extra: runDiagnosticsTests))

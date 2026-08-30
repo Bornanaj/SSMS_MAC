@@ -242,6 +242,16 @@ struct MainWindowView: View {
             if let server = app.server(id: serverID) {
                 ExportDataSheet(server: server, database: database, schema: schema, table: table)
             }
+        case .queryStore(let serverID, let database):
+            if let server = app.server(id: serverID) {
+                QueryStoreSheet(server: server, initialDatabase: database)
+            }
+        case .errorLog(let serverID):
+            if let server = app.server(id: serverID) {
+                ErrorLogSheet(server: server)
+            }
+        case .executionPlan(let title, let xml):
+            PlanPreviewSheet(title: title, xml: xml)
         case .scriptPreview(let title, let sql):
             ScriptPreviewSheet(title: title, sql: sql)
         case .exportResults:

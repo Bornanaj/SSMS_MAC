@@ -18,12 +18,23 @@ struct ActivityMonitorView: View {
     @State private var selectedSession: ActivitySession?
     @State private var refreshTask: Task<Void, Never>?
 
+    /// Derived from `sessions` rather than queried separately, so the tree can never
+    /// disagree with the process list it is drawn from.
+    private var blockingRows: [BlockingRow] {
+        BlockingChain.rows(from: BlockingChain.build(from: sessions))
+    }
+
+    private var blockedCount: Int {
+        sessions.filter { $0.isBlocked && $0.blockingSessionID != $0.sessionID }.count
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider()
             Picker("", selection: $selectedTab) {
                 Text("Processes").tag("sessions")
+                Text(blockedCount > 0 ? "Blocking (\(blockedCount))" : "Blocking").tag("blocking")
                 Text("Resource Waits").tag("waits")
                 Text("Recent Expensive Queries").tag("queries")
                 Text("Data File I/O").tag("io")
@@ -74,10 +85,78 @@ struct ActivityMonitorView: View {
                                    description: Text(errorText))
         } else {
             switch selectedTab {
+            case "blocking": blockingTree
             case "waits": waitsTable
             case "queries": queriesTable
             case "io": ioTable
             default: sessionsTable
+            }
+        }
+    }
+
+    /// The blocking tree. Killing the head of a chain is usually the fix, so the head is
+    /// called out and its statement is shown underneath.
+    @ViewBuilder
+    private var blockingTree: some View {
+        if blockingRows.isEmpty {
+            ContentUnavailableView("Nothing is blocked", systemImage: "checkmark.circle",
+                                   description: Text(includeSystem
+                                       ? "No session is waiting on another."
+                                       : "No user session is waiting on another. Turn on system "
+                                         + "sessions if a background task is the suspect."))
+        } else {
+            VSplitView {
+                Table(blockingRows, selection: Binding(
+                    get: { selectedSession.map { Set([$0.id]) } ?? [] },
+                    set: { ids in selectedSession = sessions.first { ids.contains($0.id) } }
+                )) {
+                    TableColumn("Chain") { row in
+                        HStack(spacing: 4) {
+                            Color.clear.frame(width: CGFloat(row.depth) * 16, height: 1)
+                            Image(systemName: row.isHead
+                                  ? "exclamationmark.triangle.fill" : "arrow.turn.down.right")
+                                .font(.system(size: 10))
+                                .foregroundStyle(row.isHead ? Color.orange : Color.secondary)
+                            Text("\(row.session.sessionID)").monospacedDigit()
+                        }
+                    }.width(130)
+                    TableColumn("Role") { row in
+                        Text(row.isHead ? "Head of chain" : "Blocked")
+                            .foregroundStyle(row.isHead ? Color.orange : Color.primary)
+                    }.width(105)
+                    TableColumn("Login") { Text($0.session.loginName) }.width(120)
+                    TableColumn("Database") { Text($0.session.databaseName) }.width(105)
+                    TableColumn("Wait") { Text($0.session.waitType).lineLimit(1) }.width(140)
+                    TableColumn("Wait (ms)") {
+                        Text("\($0.session.waitTimeMs)").monospacedDigit()
+                    }.width(85)
+                    TableColumn("Open txns") {
+                        Text("\($0.session.openTransactionCount)").monospacedDigit()
+                    }.width(80)
+                    TableColumn("Host / application") { row in
+                        Text([row.session.hostName, row.session.programName]
+                            .filter { !$0.isEmpty }.joined(separator: " · "))
+                            .lineLimit(1)
+                    }.width(min: 130, ideal: 200)
+                }
+                .contextMenu(forSelectionType: Int.self) { ids in
+                    if let id = ids.first {
+                        Button("Kill Process \(id)", role: .destructive) { kill(id) }
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Statement").font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                    ScrollView {
+                        Text(selectedSession?.sqlText
+                             ?? "Select a session to see what it is running.")
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .padding(8)
+                .frame(minHeight: 90, idealHeight: 130)
             }
         }
     }
@@ -182,10 +261,26 @@ struct ActivityMonitorView: View {
             Text("\(sessions.count) processes")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            if blockedCount > 0 {
+                Text("· \(blockedCount) blocked")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+            if selectedTab == "blocking", let worst = worstOffender, worst.descendantCount > 0 {
+                Text("· spid \(worst.session.sessionID) is holding up "
+                     + "\(worst.descendantCount)")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
             Spacer()
             Button("Close") { dismiss() }.keyboardShortcut(.defaultAction)
         }
         .padding(12)
+    }
+
+    /// The session an operator should look at first: the one holding up the most others.
+    private var worstOffender: BlockingNode? {
+        BlockingChain.worstOffender(in: BlockingChain.build(from: sessions))
     }
 
     private func startAutoRefresh() {

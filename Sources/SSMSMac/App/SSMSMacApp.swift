@@ -189,6 +189,18 @@ struct AppCommands: Commands {
             }
             .disabled(currentServer == nil)
 
+            Button("SQL Server Logs…") {
+                if let server = currentServer { app.activeSheet = .errorLog(server.id) }
+            }
+            .disabled(currentServer == nil)
+
+            Button("Query Store…") {
+                if let server = currentServer {
+                    app.activeSheet = .queryStore(server.id, app.selectedTab?.database)
+                }
+            }
+            .disabled(currentServer == nil)
+
             Divider()
 
             Button("Logins…") {

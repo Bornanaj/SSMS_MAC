@@ -2,7 +2,9 @@ import Foundation
 import TDSKit
 import SQLServerKit
 
-func runSQLServerKitTests(_ t: TestRunner) -> Int32 {
+/// The kit suites. `extra` runs after them and before the summary, so another file can
+/// add suites without having to know about `TestRunner.finish()`.
+func runSQLServerKitTests(_ t: TestRunner, extra: (TestRunner) -> Void = { _ in }) -> Int32 {
 
     t.suite("lexer") {
         let lexer = TSQLLexer()
@@ -355,6 +357,8 @@ func runSQLServerKitTests(_ t: TestRunner) -> Int32 {
         let affected = TextResultFormatter(style: style).rowsAffected(1)
         t.expect(affected.contains("(1 row affected)"), "singular row count", affected)
     }
+
+    extra(t)
 
     return t.finish()
 }
