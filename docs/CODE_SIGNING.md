@@ -59,10 +59,18 @@ open-source macOS developer tools ship this way.
 
 ### Unsigned download
 
-The app still runs; macOS just asks once. Either:
+The app still runs; macOS just asks once.
 
-- right-click (or Control-click) the app → **Open** → **Open**, or
-- `xattr -dr com.apple.quarantine "/Applications/SSMS for Mac.app"`
+**On macOS 15 (Sequoia) and later, right-click → Open no longer works.** Apple removed
+that bypass, which is why the dialog on those versions offers only "Move to Trash" and
+"Done" with no "Open Anyway" button in it. Use one of these instead:
+
+- **System Settings → Privacy & Security**, scroll to the line naming the blocked file,
+  and press **Open Anyway**, then authenticate; or
+- `xattr -dr com.apple.quarantine <file>` — `Scripts/allow-download.sh` wraps this with a
+  check of what it is about to touch.
+
+On macOS 14 and earlier, right-click → Open → Open still works.
 
 Telling users to strip quarantine is asking them to disable a security check, so it
 belongs in a footnote, not in the headline install instructions.

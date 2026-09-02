@@ -14,9 +14,12 @@
 self-signed certificate.</li>
 </ul>
 <p><b>About this build</b></p>
-<p>This build is signed ad hoc rather than with an Apple Developer ID. Installing through
-this installer is the smoothest route: the app it writes to your Applications folder is
-not quarantined, so it opens normally afterwards.</p>
+<p>This build is signed ad hoc rather than with an Apple Developer ID, so macOS challenged
+this installer once before letting it run. The app it writes to your Applications folder
+is <b>not</b> quarantined, so it opens normally from then on.</p>
+<p>On macOS 15 and later, a blocked download is cleared under <b>System Settings &rsaquo;
+Privacy &amp; Security &rsaquo; Open Anyway</b> &mdash; right-click &rsaquo; Open no longer
+works there.</p>
 <p class="muted">Source code and issue tracker:
 https://github.com/Bornanaj/SSMS_MAC</p>
 </body></html>

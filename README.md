@@ -36,8 +36,27 @@ Introduction → Read Me → License → Destination → Install. It asks for yo
 once, because writing to `/Applications` needs administrator rights.
 
 The quarantine flag macOS attaches to a download lands on the `.pkg`, not on the payload
-it writes, so **the installed app opens with no Gatekeeper prompt**. If the installer
-itself is refused on first open, use right-click → Open once.
+it writes, so **the installed app opens with no Gatekeeper prompt**.
+
+The installer itself is still challenged once, because this build is not notarized:
+
+> "Apple could not verify … is free of malware."
+
+On **macOS 15 and later** the old right-click → Open trick no longer clears this. Do one
+of these instead:
+
+- **System Settings → Privacy & Security**, scroll to the message naming the file, and
+  press **Open Anyway**; or
+- clear the flag from a terminal:
+
+  ```bash
+  xattr -dr com.apple.quarantine ~/Downloads/SSMS-for-Mac-*.pkg
+  ```
+
+  `./Scripts/allow-download.sh <file>` does the same thing and explains what it is doing.
+
+A package you built yourself is never quarantined, so `./Scripts/make-pkg.sh release`
+followed by opening `build/SSMS-for-Mac-<version>.pkg` shows no prompt at all.
 
 ### Build from source
 
@@ -65,17 +84,20 @@ Grab the `.dmg` from [Releases](https://github.com/Bornanaj/SSMS_MAC/releases) a
 the app to Applications. This is the drag-and-drop route; the `.pkg` above is the
 stepped installer.
 
-Unless the release notes say the build is notarized, macOS will ask once:
+Unless the release notes say the build is notarized, macOS will ask:
 
 > Apple could not verify "SSMS for Mac" is free of malware…
 
 That is the quarantine flag macOS attaches to *anything* downloaded, not a problem with
-the app. Open it once with **right-click → Open → Open** and macOS remembers the choice.
-Clearing the flag outright also works:
+the app. On macOS 15 and later, clear it through **System Settings → Privacy & Security →
+Open Anyway**, or from a terminal:
 
 ```bash
 xattr -dr com.apple.quarantine "/Applications/SSMS for Mac.app"
 ```
+
+The `.pkg` above avoids this for the app entirely, which is why it is the recommended
+download.
 
 Removing that prompt for downloads requires an Apple Developer ID certificate and Apple
 notarization ($99/year); the release pipeline already implements it and switches on as
