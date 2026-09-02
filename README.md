@@ -28,7 +28,18 @@ or JVM to install** — the TDS 7.4 protocol is implemented in Swift inside this
 
 ## Install
 
-### Build from source — recommended
+### Installer package — recommended
+
+Download `SSMS-for-Mac-<version>.pkg` from
+[Releases](https://github.com/Bornanaj/SSMS_MAC/releases), open it, and step through
+Introduction → Read Me → License → Destination → Install. It asks for your password
+once, because writing to `/Applications` needs administrator rights.
+
+The quarantine flag macOS attaches to a download lands on the `.pkg`, not on the payload
+it writes, so **the installed app opens with no Gatekeeper prompt**. If the installer
+itself is refused on first open, use right-click → Open once.
+
+### Build from source
 
 One command. The app is compiled on your machine, so macOS never quarantines it and
 opens it with **no Gatekeeper prompt**:
@@ -51,7 +62,8 @@ brew install --HEAD bornanaj/ssms/ssms-mac
 ### Disk image
 
 Grab the `.dmg` from [Releases](https://github.com/Bornanaj/SSMS_MAC/releases) and drag
-the app to Applications.
+the app to Applications. This is the drag-and-drop route; the `.pkg` above is the
+stepped installer.
 
 Unless the release notes say the build is notarized, macOS will ask once:
 
@@ -221,6 +233,9 @@ Scripts/
   build-app.sh         SwiftPM build plus .app assembly
   make-icon.swift      generates the icon, so no binary art is checked in
   make-dmg.sh          packages the disk image
+  make-pkg.sh          builds the stepped .pkg installer
+  make-installer-art.swift  generates the installer background
+  Installer/           installer pages, English and Persian
   sign-and-notarize.sh Developer ID signing and Apple notarization
   test.sh              offline suite, then the live suites when a server answers
 docs/

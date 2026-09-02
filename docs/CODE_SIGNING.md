@@ -34,8 +34,22 @@ compiled locally ──► not quarantined ────────────�
 | Path | Cost | Prompt on first launch |
 |---|---|---|
 | Build from source (`Scripts/install.sh`) | free | none |
-| Unsigned `.dmg` download | free | yes, cleared by right-click → Open once |
-| Developer ID + notarized `.dmg` | $99/year | none |
+| Unsigned `.pkg` installer | free | once, on the installer itself — not on the app |
+| Unsigned `.dmg` download | free | yes, on the app, cleared by right-click → Open once |
+| Developer ID + notarized | $99/year | none |
+
+### Why the installer package behaves better
+
+Quarantine is attached to the *downloaded file*. A `.dmg` is a container you copy the app
+out of, and the copy inherits the flag, so the app itself is quarantined and Gatekeeper
+challenges it. A `.pkg` is executed by Installer.app, which writes its payload directly;
+the written bundle carries no quarantine attribute. One prompt on the installer replaces
+a prompt on the app, and the app then launches normally forever after.
+
+Signing an installer needs a **Developer ID Installer** certificate, which is a different
+certificate from the Developer ID Application one used for the app. `Scripts/make-pkg.sh`
+reads it from `DEVELOPER_ID_INSTALLER`, and the release workflow from the
+`MACOS_DEVELOPER_ID_INSTALLER` secret.
 
 ### Build from source
 
