@@ -28,6 +28,20 @@ struct SSMSMacApp: App {
             QueryHistoryView()
                 .environmentObject(app)
         }
+
+        WindowGroup("Schema Compare", id: "schema-compare", for: CompareLaunch.self) { $launch in
+            SchemaCompareWindow(launch: launch ?? CompareLaunch())
+                .environmentObject(app)
+                .environmentObject(settings)
+                .preferredColorScheme(settings.colorScheme)
+        }
+
+        WindowGroup("Data Compare", id: "data-compare", for: CompareLaunch.self) { $launch in
+            DataCompareWindow(launch: launch ?? CompareLaunch())
+                .environmentObject(app)
+                .environmentObject(settings)
+                .preferredColorScheme(settings.colorScheme)
+        }
     }
 }
 
@@ -65,6 +79,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct AppCommands: Commands {
     @ObservedObject var app: AppState
     @ObservedObject var settings: AppSettings
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
@@ -251,6 +266,22 @@ struct AppCommands: Commands {
                 if let server = currentServer { app.activeSheet = .attachDatabase(server.id) }
             }
             .disabled(currentServer == nil)
+
+            Divider()
+
+            Button("New Schema Comparison…") {
+                openWindow(id: "schema-compare",
+                           value: CompareLaunch(serverID: currentServer?.id, database: app.selectedTab?.database))
+            }
+            .keyboardShortcut("k", modifiers: [.command, .option])
+
+            Button("New Data Comparison…") {
+                openWindow(id: "data-compare",
+                           value: CompareLaunch(serverID: currentServer?.id, database: app.selectedTab?.database))
+            }
+            .keyboardShortcut("k", modifiers: [.command, .option, .shift])
+
+            Button("Open Comparison Project…") { openComparisonProject() }
         }
 
         CommandMenu("Edit Extras") {
@@ -330,6 +361,16 @@ struct AppCommands: Commands {
                 tab.isDirty = false
             }
         }
+    }
+
+    /// Opens a saved .scmp or .dcmp project in the matching compare window.
+    private func openComparisonProject() {
+        guard let url = CompareFilePanels.open(directory: false, types: [CompareFilePanels.schemaProjectType,
+                                                                        CompareFilePanels.dataProjectType])
+        else { return }
+        let kind = (try? CompareProject.read(from: url))?.kind
+        let isData = kind == .data || (kind == nil && url.pathExtension.lowercased() == "dcmp")
+        openWindow(id: isData ? "data-compare" : "schema-compare", value: CompareLaunch(projectPath: url.path))
     }
 
     private func saveScript(as saveAs: Bool) {
