@@ -83,7 +83,8 @@ public struct DataTableSettings: Codable, Hashable, Sendable {
         sourceTable = mapping.source.qualifiedName
         targetTable = mapping.target.qualifiedName
         isIncluded = mapping.isIncluded
-        keyColumns = mapping.keySource == .custom ? mapping.keyColumns.map(\.sourceColumn) : []
+        // Kept for every key, so a unique index chosen over the primary key survives a reload.
+        keyColumns = mapping.keyColumns.map(\.sourceColumn)
         excludedColumns = mapping.columns.filter { !$0.isIncluded && !$0.isKey }.map(\.sourceColumn)
         sourceWhere = mapping.sourceWhere
         targetWhere = mapping.targetWhere

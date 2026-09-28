@@ -257,6 +257,28 @@ public enum DataCompareMapper {
         mapping.keyName = ""
     }
 
+    /// Use `key` (one of the source table's keys) as the comparison key.
+    public static func useKey(_ mapping: inout DataTableMapping, key: DataKeyInfo) {
+        setCustomKey(&mapping, columns: key.columns)
+        guard mapping.hasKey else { return }
+        switch key.kind {
+        case .primaryKey: mapping.keySource = .primaryKey
+        case .uniqueConstraint: mapping.keySource = .uniqueConstraint
+        case .uniqueIndex: mapping.keySource = .uniqueIndex
+        }
+        mapping.keyName = key.name
+    }
+
+    /// Use `columns` as the key, reported as the table's own key when they are exactly one.
+    public static func useKey(_ mapping: inout DataTableMapping, columns: [String]) {
+        let wanted = columns.map { $0.lowercased() }
+        if let key = mapping.source.keys.first(where: { $0.columns.map { $0.lowercased() } == wanted }) {
+            useKey(&mapping, key: key)
+        } else {
+            setCustomKey(&mapping, columns: columns)
+        }
+    }
+
     private static func setKey(_ mapping: inout DataTableMapping, columns: [String]) {
         // Key columns go first, in key order.
         var keyed: [DataColumnMapping] = []
@@ -281,7 +303,7 @@ public enum DataCompareMapper {
             mappings[index].isIncluded = setting.isIncluded
             mappings[index].sourceWhere = setting.sourceWhere
             mappings[index].targetWhere = setting.targetWhere
-            if !setting.keyColumns.isEmpty { setCustomKey(&mappings[index], columns: setting.keyColumns) }
+            if !setting.keyColumns.isEmpty { useKey(&mappings[index], columns: setting.keyColumns) }
             let excluded = Set(setting.excludedColumns.map { $0.lowercased() })
             for column in mappings[index].columns.indices where !mappings[index].columns[column].isKey {
                 mappings[index].columns[column].isIncluded = !excluded.contains(

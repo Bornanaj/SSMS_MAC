@@ -5,6 +5,7 @@ import SQLServerKit
 /// can actually carry out.
 struct ObjectExplorerMenu: View {
     @EnvironmentObject var app: AppState
+    @Environment(\.openWindow) private var openWindow
     let node: ObjectExplorerNode
     @ObservedObject var model: ObjectExplorerModel
 
@@ -64,6 +65,16 @@ struct ObjectExplorerMenu: View {
         Button("Generate Scripts…") {
             if let server = app.server(for: node), let name = node.name {
                 app.activeSheet = .generateScripts(server.id, name)
+            }
+        }
+        Menu("Compare") {
+            Button("Schema Compare…") {
+                openWindow(id: "schema-compare",
+                           value: CompareLaunch(serverID: app.server(for: node)?.id, database: node.name))
+            }
+            Button("Data Compare…") {
+                openWindow(id: "data-compare",
+                           value: CompareLaunch(serverID: app.server(for: node)?.id, database: node.name))
             }
         }
         Menu("Tasks") {
