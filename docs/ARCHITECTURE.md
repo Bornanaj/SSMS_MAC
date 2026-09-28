@@ -212,3 +212,62 @@ the happy path.
 Azure SQL Database needs `ALTER DATABASE CURRENT` because it has no cross-database `ALTER`
 and no reachable `master`, so the script builder takes a flag for it and the caller decides
 from `ServerInfo`.
+
+## Schema Compare works on snapshots, whatever the source
+
+Every data source — a live database, a `.ssnap` file, a scripts folder — is turned into the
+same `SchemaSnapshot` before anything is compared, so the comparer, the deployment planner
+and the reports never know where a side came from. `LiveSchemaReader` reads a database in
+about 25 bulk catalog queries (one per object family, never one per object), which keeps a
+database with thousands of objects to a few seconds; a family that fails to read (a missing
+permission, an older server) becomes a warning on the snapshot rather than a failed
+comparison. `SchemaScriptParser` builds the same model from DDL: a table's indexes,
+constraints, triggers and permissions may be spread over any files in any order, so they
+are collected as pending operations and attached once every file has been read.
+
+Objects are compared twice over. `SchemaNormalizer.prepared` keeps everything deployment
+needs (filegroups included, because a partitioned table cannot be re-keyed without its
+scheme), while `fingerprint` renders a canonical JSON form with the ignored properties
+blanked and collections sorted; two objects are identical exactly when their fingerprints
+match. Module bodies are compared through `ModuleText.comparable`, which rewrites the
+header to a canonical `CREATE <kind> [schema].[name]` first, so `create proc dbo.x` and
+`CREATE PROCEDURE [dbo].[x]` agree, and stored expressions go through
+`ModuleText.expression`, because SQL Server hands `DEFAULT 0` back as `((0))`.
+
+## Deployment is planned in phases, then ordered by dependencies
+
+The planner never emits statements in the order differences were found. Each action is
+placed in a phase — drop foreign keys, drop, rename, create/alter, late drop, add foreign
+keys, post — and objects inside a phase are ordered topologically (Kahn's algorithm) over
+the dependency graph read from `sys.sql_expression_dependencies` or, for scripts, from the
+names a module body references. Foreign keys are dropped and re-added in one global pass
+so a table rebuild never trips over a key on another table. Objects an altered object still
+uses (a function a computed column calls, say) move to the late-drop phase.
+
+A table change SQL Server cannot express with `ALTER TABLE` — the identity property of an
+existing column, a column order that must match (with *Force column order*), FILESTREAM or
+column-set changes, a move to another filegroup, switching memory-optimized on or off — is
+deployed as a rebuild: create
+`SSMS_Rebuild_<name>`, copy the rows with `IDENTITY_INSERT`, drop the original, rename the
+copy, and re-create its indexes, triggers and permissions. The script uses the same
+transaction pattern Redgate's tools produce (`IF @@ERROR <> 0 SET NOEXEC ON` after every
+batch and an `@Success` check at the end), so a failure anywhere stops the rest of the
+script without depending on `XACT_ABORT` reaching batches that fail to compile.
+
+## Data Compare streams one side through the other
+
+Rows are matched through a dictionary keyed by the comparison key's canonical text
+(`DataValueComparer.keyComponent`), built from the target while the source streams past
+it. Two key values SQL Server considers equal — `'abc'` and `'ABC  '` under a
+case-insensitive collation — produce the same text, which is why rows are not ordered on
+the server and merged: a server-side `ORDER BY` sorts by the column's collation, and
+reproducing every collation's sort order on the client is far harder than reproducing its
+equality. Kept rows (differences, and identical rows when they are shown) are capped per
+table and outcome by `maximumRowsKept`, so memory stays bounded however large the tables.
+
+The synchronization script turns off only the foreign keys and triggers that are enabled
+in the target, and turns the keys back on `WITH CHECK` when they were trusted before, so a
+deployment never leaves a key untrusted (which would silently stop the optimizer using it).
+Dates are written in the forms SQL Server documents as language-neutral (`'20240304'`,
+`'2024-03-04T10:00:00.123'`), because the script may run under a login whose language
+reads `2024-03-04` as the 3rd of April.

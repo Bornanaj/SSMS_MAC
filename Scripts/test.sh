@@ -43,5 +43,21 @@ run_with_timeout() {
     wait "$pid"
 }
 
+# A database compared with itself must come out identical (exit 63) in both tools; any
+# difference means the reader, normalizer or comparer disagrees with itself.
+echo "==> schema and data compare against the same database"
+DB="${SQL_DB:-master}"
+for kind in schema data; do
+    ./.build/debug/ssms-compare "$kind" --quiet \
+        --source-server "$HOST,$PORT" --source-database "$DB" \
+        --target-server "$HOST,$PORT" --target-database "$DB"
+    status=$?
+    if [ "$status" -ne 63 ]; then
+        echo "    $kind compare of $DB with itself exited $status, expected 63 (identical)"
+        exit 1
+    fi
+done
+echo "    ok"
+
 echo "==> application self test"
 run_with_timeout 180 ./.build/debug/ssms-mac --selftest || exit 1

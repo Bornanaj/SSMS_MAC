@@ -8,7 +8,9 @@
 A native macOS SQL Server client in the shape of SQL Server Management Studio:
 Object Explorer, a T-SQL editor with IntelliSense, a results grid, execution plans,
 scripting, an editable data grid, activity monitoring, backup/restore, flat-file import,
-Standard Reports, Query Store and the error log viewer.
+Standard Reports, Query Store and the error log viewer — plus **Schema Compare** and
+**Data Compare**, modelled on Redgate SQL Compare and SQL Data Compare, in the app and
+on the command line.
 
 It talks to SQL Server directly. There is **no ODBC driver, FreeTDS, Docker container
 or JVM to install** — the TDS 7.4 protocol is implemented in Swift inside this repo.
@@ -19,7 +21,8 @@ or JVM to install** — the TDS 7.4 protocol is implemented in Swift inside this
 │                Object Explorer · editor · grid · dialogs     │
 ├─────────────────────────────────────────────────────────────┤
 │ SQLServerKit   sessions · catalog queries · scripting ·      │
-│                admin · IntelliSense · import/export          │
+│                admin · IntelliSense · import/export ·        │
+│                schema and data comparison                    │
 ├─────────────────────────────────────────────────────────────┤
 │ TDSKit         TDS 7.4 over SwiftNIO + NIOSSL                │
 │                PRELOGIN · TLS · LOGIN7 · token stream        │
@@ -179,6 +182,77 @@ swift build -c release          # libraries and executables
   server-side filtering and a severity column inferred from the wording
 - SQL Server Agent: jobs, steps, schedules as sentences, history, start/stop/enable
 
+**Schema Compare** (Tools → New Schema Comparison, ⌥⌘K, or a database's *Compare* menu)
+- Compares a live database, a snapshot (`.ssnap`) or a scripts folder with any of the three
+- Covers tables (columns, keys, indexes, constraints, triggers, statistics, full-text,
+  temporal, memory-optimized, partitioning), views, procedures, functions (T-SQL and CLR),
+  synonyms, sequences, types, table types, XML schema collections, assemblies, partition
+  functions and schemes, schemas, users, roles, application roles, permissions, extended
+  properties, rules, defaults, security policies, full-text catalogs and stoplists,
+  Service Broker objects and DDL triggers
+- Results grouped by outcome (different, only in source, only in target, identical) or by
+  type, with a side-by-side SQL diff and a plain-language list of what changed
+- 49 comparison and deployment options: whitespace, comments, case, brackets, collations,
+  fill factor, filegroups, compression, identity seed, constraint names, permissions,
+  statistics, trigger order, WITH NOCHECK, … and dependency handling, smart defaults,
+  existence checks, drop-and-create, transactions, error handling, ONLINE index builds
+- Owner (schema) mapping, object mapping for renamed objects, column mapping, and
+  include/exclude filters by type, name and schema (equals, LIKE, regex, …)
+- Deployment wizard: every action and the dependencies it pulled in, warnings by
+  severity (data loss, table rebuilds, dropped columns), the full script, and deployment
+  in one transaction that rolls back on the first error. Tables are altered in place where
+  SQL Server allows it and rebuilt with their data kept where it does not; foreign keys,
+  schema-bound views and dependent objects are dropped and restored around the change
+- Deploy to a database or update a scripts folder file by file; save the script, open it
+  in a query window, or run it
+- Projects (`.scmp`), snapshots, scripts folders, and HTML, Excel, XML, CSV and JSON reports
+
+**Data Compare** (Tools → New Data Comparison, ⌥⇧⌘K, or a database's *Compare* menu)
+- Pairs tables and views automatically, including across schemas with owner mapping, and
+  lets you pair tables whose names differ
+- Comparison key per table: primary key, a unique constraint or index, or any columns
+  you choose; choose the compared columns and add a WHERE filter for each side
+- SQL Server's own equality: collation-aware text (case and accent sensitivity), trailing
+  spaces ignored, numbers by value across types, datetimeoffset by instant; options for
+  binary collation, white space, empty strings as NULL, float precision, fractional
+  seconds, identity/computed/rowversion/LOB columns, and a CHECKSUM shortcut
+- Row counts per table by outcome, and a row grid with source and target values side by
+  side, differing cells highlighted, and a deploy checkbox per row
+- Synchronization wizard: inserts, updates and deletes per table, warnings, the script,
+  and deployment. Exactly the enabled foreign keys and triggers are switched off and back
+  on (re-checked so they stay trusted), deletes run child-first and inserts parent-first,
+  identity values are kept with IDENTITY_INSERT, and identities can be reseeded
+- Projects (`.dcmp`) and HTML, Excel, XML, CSV and JSON reports
+
+## Comparing from the command line
+
+`ssms-compare` runs both comparisons without the app — for build pipelines, scheduled
+drift checks and release scripts:
+
+```bash
+swift build -c release --product ssms-compare
+
+# What differs? Report it; exit code 79 means differences, 63 identical.
+.build/release/ssms-compare schema \
+    --source-server dev --source-database Shop \
+    --target-server prod --target-database Shop \
+    --report drift.html
+
+# Deploy a scripts folder from source control, refusing if data could be lost.
+.build/release/ssms-compare schema --source-scripts ./database \
+    --target-server prod --target-database Shop \
+    --abort-on-warnings high --script deploy.sql --deploy
+
+# Synchronize two tables' rows.
+.build/release/ssms-compare data \
+    --source-server dev --source-database Shop --target-server test --target-database Shop \
+    --include-table dbo.Product,dbo.Category --deploy
+```
+
+Passwords come from `--source-password` / `--target-password` or the `SSMS_SOURCE_PASSWORD`,
+`SSMS_TARGET_PASSWORD` and `SQL_PASSWORD` environment variables. Projects saved in the app
+run unchanged with `--project`. `ssms-compare help` lists every option.
+
 ## Data fidelity
 
 Values are decoded from the wire, not through an intermediate driver, so they render the
@@ -201,7 +275,7 @@ into mojibake.
 ## Testing
 
 ```bash
-swift run ssms-tests          # 222 offline regression checks, no server needed
+swift run ssms-tests          # 310 offline regression checks, no server needed
 swift run tdscli all          # service smoke tests against a live server
 ./.build/debug/ssms-mac --selftest   # drives the real UI models end to end
 ```
@@ -230,6 +304,10 @@ docker run -d --platform linux/amd64 --name ssms-mac-test \
   `sp_readerrorlog` requires. It reports the permission error rather than an empty log.
 - Query Store needs SQL Server 2016 or later, and the reports stay empty until the first
   collection interval closes after switching it on.
+- Schema Compare reads live databases, snapshots and scripts folders; backup files and
+  direct source-control links are not data sources (a scripts folder kept in Git is the
+  equivalent). Data Compare compares live databases only.
+- Deploying to a snapshot is not possible — save the script and run it instead.
 
 ## Contributing
 
@@ -249,6 +327,7 @@ Sources/
   SQLServerKit/    session, catalog queries, scripting, admin, IO, IntelliSense
   SSMSMac/         SwiftUI app
   SSMSTests/       offline regression suite
+  SSMSCompare/     ssms-compare, the schema and data comparison command line
   TDSCLI/          live service smoke tests
 Scripts/
   install.sh           build from source and install into /Applications

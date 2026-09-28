@@ -179,6 +179,6 @@ struct DataCommand {
             }
         }
         let totals = DataRowStatus.allCases.map { "\($0.title): \(comparison.total($0))" }
-        FileHandle.standardError.write(Data((totals.joined(separator: ", ") + "\n").utf8))
+        log(totals.joined(separator: ", "), quiet: args.flag("quiet"))
     }
 }
