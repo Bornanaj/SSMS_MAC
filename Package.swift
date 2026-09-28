@@ -9,7 +9,8 @@ let package = Package(
         .library(name: "SQLServerKit", targets: ["SQLServerKit"]),
         .executable(name: "ssms-mac", targets: ["SSMSMac"]),
         .executable(name: "tdscli", targets: ["TDSCLI"]),
-        .executable(name: "ssms-tests", targets: ["SSMSTests"])
+        .executable(name: "ssms-tests", targets: ["SSMSTests"]),
+        .executable(name: "ssms-compare", targets: ["SSMSCompare"])
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
@@ -44,6 +45,11 @@ let package = Package(
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOEmbedded", package: "swift-nio")
             ],
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
+        .executableTarget(
+            name: "SSMSCompare",
+            dependencies: ["SQLServerKit", "TDSKit"],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .executableTarget(
