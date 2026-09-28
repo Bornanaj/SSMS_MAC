@@ -290,6 +290,13 @@ public struct SchemaNormalizer: Sendable {
                 column.identity = identity
             }
             if options.ignoreIdentityProperty { column.identity = nil }
+            if column.isComputed {
+                // A computed column's type and (unless persisted) nullability are derived
+                // from its expression, not declared.
+                column.dataType = ""
+                column.collation = nil
+                if !column.isPersisted { column.isNullable = true }
+            }
             column.computedExpression = column.computedExpression.map(ModuleText.expression)
             if var constraint = column.defaultConstraint {
                 constraint.name = constraintName(constraint.name, isSystemNamed: constraint.isSystemNamed)
