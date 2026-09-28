@@ -1017,37 +1017,22 @@ public struct LiveSchemaReader: Sendable {
         for row in sets.first ?? [] {
             let tableID = row.int("type_table_object_id")
             var object = SchemaObject(type: .tableType, schema: row.string("schema_name"), name: row.string("name"))
-            var columns = context.columnsByObject[tableID] ?? []
-            for index in columns.indices {
-                // Table type constraints are always system named; drop the names so two
-                // databases that agree render the same text.
-                if columns[index].defaultConstraint != nil {
-                    columns[index].defaultConstraint?.name = ""
-                    columns[index].defaultConstraint?.isSystemNamed = true
-                }
-            }
-            var lines: [String] = columns.map { "    " + writer.columnDefinition($0) }
+            let columns = context.columnsByObject[tableID] ?? []
+            var typeIndexes: [TableTypeIndex] = []
             for index in (indexes[tableID] ?? []).sorted(by: { $0.int("index_id") < $1.int("index_id") }) {
                 let members = (indexColumns[IndexID(object: tableID, index: index.int("index_id"))] ?? [])
                     .filter { !$0.bool("is_included_column") }
                     .map { IndexColumn(name: $0.string("name"), isDescending: $0.bool("is_descending_key")) }
-                let list = writer.indexColumnList(members)
-                let clustered = index.int("index_type") == 1 ? "CLUSTERED" : "NONCLUSTERED"
-                let ignoreDup = index.bool("ignore_dup_key") ? " WITH (IGNORE_DUP_KEY = ON)" : ""
-                if index.bool("is_primary_key") {
-                    lines.append("    PRIMARY KEY \(clustered) (\(list))\(ignoreDup)")
-                } else if index.bool("is_unique_constraint") {
-                    lines.append("    UNIQUE \(clustered) (\(list))\(ignoreDup)")
-                } else {
-                    let unique = index.bool("is_unique") ? "UNIQUE " : ""
-                    lines.append("    INDEX \(SQLIdentifier.quote(index.string("name"))) \(unique)\(clustered) (\(list))")
-                }
+                let kind: TableTypeIndex.Kind = index.bool("is_primary_key") ? .primaryKey
+                    : (index.bool("is_unique_constraint") ? .unique : .index)
+                typeIndexes.append(TableTypeIndex(kind: kind, name: index.string("name"),
+                                                  isUnique: index.bool("is_unique"),
+                                                  isClustered: index.int("index_type") == 1,
+                                                  columns: members, ignoreDupKey: index.bool("ignore_dup_key")))
             }
-            for check in checks[tableID] ?? [] {
-                lines.append("    CHECK " + SchemaScriptWriter.parenthesized(check))
-            }
-            var body = "CREATE TYPE \(object.quotedName) AS TABLE\n(\n" + lines.joined(separator: ",\n") + "\n)"
-            if row.bool("is_memory_optimized") { body += "\nWITH (MEMORY_OPTIMIZED = ON)" }
+            let body = writer.tableTypeBody(quotedName: object.quotedName, columns: columns, indexes: typeIndexes,
+                                            checks: checks[tableID] ?? [],
+                                            memoryOptimized: row.bool("is_memory_optimized"))
             object.body = body
             let owner = row.string("owner_name")
             if !owner.isEmpty { object.owner = owner }

@@ -1,5 +1,31 @@
 import Foundation
 
+/// A key or index declared inside a table type.
+public struct TableTypeIndex: Sendable, Hashable {
+    public enum Kind: Sendable, Hashable {
+        case primaryKey
+        case unique
+        case index
+    }
+
+    public var kind: Kind
+    public var name: String
+    public var isUnique: Bool
+    public var isClustered: Bool
+    public var columns: [IndexColumn]
+    public var ignoreDupKey: Bool
+
+    public init(kind: Kind, name: String = "", isUnique: Bool = false, isClustered: Bool,
+                columns: [IndexColumn], ignoreDupKey: Bool = false) {
+        self.kind = kind
+        self.name = name
+        self.isUnique = isUnique
+        self.isClustered = isClustered
+        self.columns = columns
+        self.ignoreDupKey = ignoreDupKey
+    }
+}
+
 /// Renders `SchemaObject`s as T-SQL.
 ///
 /// The same writer produces the text shown in the SQL differences pane, the files of a
@@ -642,6 +668,40 @@ public struct SchemaScriptWriter: Sendable {
         default:
             return "DROP \(type.dropKeyword) \(key.quotedName)"
         }
+    }
+
+    // MARK: - Table types
+
+    /// Canonical CREATE TYPE … AS TABLE text, shared by the live reader and the script parser
+    /// so both produce identical bodies.
+    public func tableTypeBody(quotedName: String, columns: [ColumnDefinition], indexes: [TableTypeIndex],
+                              checks: [String], memoryOptimized: Bool) -> String {
+        var lines: [String] = columns.map { column -> String in
+            var copy = column
+            if copy.defaultConstraint != nil {
+                copy.defaultConstraint?.name = ""
+                copy.defaultConstraint?.isSystemNamed = true
+            }
+            return "    " + columnDefinition(copy)
+        }
+        for index in indexes {
+            let list = indexColumnList(index.columns)
+            let clustered = index.isClustered ? "CLUSTERED" : "NONCLUSTERED"
+            let ignoreDup = index.ignoreDupKey ? " WITH (IGNORE_DUP_KEY = ON)" : ""
+            switch index.kind {
+            case .primaryKey: lines.append("    PRIMARY KEY \(clustered) (\(list))\(ignoreDup)")
+            case .unique: lines.append("    UNIQUE \(clustered) (\(list))\(ignoreDup)")
+            case .index:
+                let unique = index.isUnique ? "UNIQUE " : ""
+                lines.append("    INDEX \(SQLIdentifier.quote(index.name)) \(unique)\(clustered) (\(list))")
+            }
+        }
+        for check in checks {
+            lines.append("    CHECK " + SchemaScriptWriter.parenthesized(check))
+        }
+        var body = "CREATE TYPE \(quotedName) AS TABLE\n(\n" + lines.joined(separator: ",\n") + "\n)"
+        if memoryOptimized { body += "\nWITH (MEMORY_OPTIMIZED = ON)" }
+        return body
     }
 
     // MARK: - Pieces
