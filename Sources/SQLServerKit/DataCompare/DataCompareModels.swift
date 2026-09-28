@@ -197,17 +197,18 @@ public struct DataTableInfo: Codable, Hashable, Sendable, Identifiable {
     public var columns: [DataColumnInfo]
     public var keys: [DataKeyInfo]
     public var approximateRows: Int64
-    public var hasTriggers: Bool
+    /// Triggers that are currently enabled, so deployment can switch off exactly those.
+    public var enabledTriggers: [String]
 
     public init(schema: String, name: String, isView: Bool, columns: [DataColumnInfo], keys: [DataKeyInfo],
-                approximateRows: Int64 = 0, hasTriggers: Bool = false) {
+                approximateRows: Int64 = 0, enabledTriggers: [String] = []) {
         self.schema = schema
         self.name = name
         self.isView = isView
         self.columns = columns
         self.keys = keys
         self.approximateRows = approximateRows
-        self.hasTriggers = hasTriggers
+        self.enabledTriggers = enabledTriggers
     }
 
     public var id: String { "\(schema.lowercased()).\(name.lowercased())" }
@@ -228,10 +229,14 @@ public struct DataColumnInfo: Codable, Hashable, Sendable {
     public var isTimestamp: Bool
     public var isLargeObject: Bool
     public var collation: String?
+    /// GENERATED ALWAYS period columns of temporal tables.
+    public var isGenerated: Bool
+    /// Base system type, for user-defined alias types (`nvarchar(20)` for `dbo.Phone`).
+    public var baseType: String
 
     public init(name: String, dataType: String, isNullable: Bool = true, isIdentity: Bool = false,
                 isComputed: Bool = false, isTimestamp: Bool = false, isLargeObject: Bool = false,
-                collation: String? = nil) {
+                collation: String? = nil, isGenerated: Bool = false, baseType: String = "") {
         self.name = name
         self.dataType = dataType
         self.isNullable = isNullable
@@ -240,10 +245,12 @@ public struct DataColumnInfo: Codable, Hashable, Sendable {
         self.isTimestamp = isTimestamp
         self.isLargeObject = isLargeObject
         self.collation = collation
+        self.isGenerated = isGenerated
+        self.baseType = baseType.isEmpty ? dataType : baseType
     }
 
     /// Columns SQL Server will not let an INSERT or UPDATE write.
-    public var isReadOnly: Bool { isComputed || isTimestamp }
+    public var isReadOnly: Bool { isComputed || isTimestamp || isGenerated }
 }
 
 public struct DataKeyInfo: Codable, Hashable, Sendable {
@@ -269,6 +276,28 @@ public struct DataKeyInfo: Codable, Hashable, Sendable {
         case .uniqueConstraint: return "Unique constraint \(name)"
         case .uniqueIndex: return "Unique index \(name)"
         }
+    }
+}
+
+/// A foreign key between two tables of one database.
+public struct DataForeignKeyInfo: Codable, Hashable, Sendable {
+    public var name: String
+    /// Lowercased `schema.name` of the table that owns the key, for matching.
+    public var table: String
+    public var referencedTable: String
+    /// The owning table's name as written, for scripts.
+    public var quotedTable: String
+    public var isEnabled: Bool
+    public var isTrusted: Bool
+
+    public init(name: String, table: String, referencedTable: String, quotedTable: String, isEnabled: Bool,
+                isTrusted: Bool) {
+        self.name = name
+        self.table = table
+        self.referencedTable = referencedTable
+        self.quotedTable = quotedTable
+        self.isEnabled = isEnabled
+        self.isTrusted = isTrusted
     }
 }
 
@@ -408,6 +437,8 @@ public struct DataTableResult: Identifiable, Sendable {
     public var comparedByChecksum: Bool
     public var sourceIdentity: TDSValue?
     public var error: String?
+    /// Things worth knowing that are not failures, e.g. duplicate key values.
+    public var notes: [String]
     public var duration: TimeInterval
     /// Deploy this table's differences.
     public var isSelected: Bool
@@ -425,6 +456,7 @@ public struct DataTableResult: Identifiable, Sendable {
         comparedByChecksum = false
         sourceIdentity = nil
         error = nil
+        notes = []
         duration = 0
         isSelected = true
     }
@@ -454,18 +486,22 @@ public struct DataComparison: Sendable {
     public var targetDatabase: String
     public var options: DataCompareOptions
     public var tables: [DataTableResult]
+    /// Foreign keys in the target, for ordering and disabling during deployment.
+    public var targetForeignKeys: [DataForeignKeyInfo]
     public var comparedAt: Date
     public var duration: TimeInterval
 
     public init(sourceDescription: String, targetDescription: String, sourceDatabase: String,
                 targetDatabase: String, options: DataCompareOptions, tables: [DataTableResult],
-                comparedAt: Date = Date(), duration: TimeInterval = 0) {
+                targetForeignKeys: [DataForeignKeyInfo] = [], comparedAt: Date = Date(),
+                duration: TimeInterval = 0) {
         self.sourceDescription = sourceDescription
         self.targetDescription = targetDescription
         self.sourceDatabase = sourceDatabase
         self.targetDatabase = targetDatabase
         self.options = options
         self.tables = tables
+        self.targetForeignKeys = targetForeignKeys
         self.comparedAt = comparedAt
         self.duration = duration
     }

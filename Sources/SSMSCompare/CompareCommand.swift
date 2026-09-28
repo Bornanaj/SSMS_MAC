@@ -16,6 +16,8 @@ struct CompareCommand {
             switch command.lowercased() {
             case "schema":
                 code = try await SchemaCommand(args: args).run()
+            case "data":
+                code = try await DataCommand(args: args).run()
             case "help", "--help", "-h":
                 print(usage)
                 code = .success
