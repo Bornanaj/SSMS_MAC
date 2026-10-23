@@ -127,7 +127,8 @@ swift build -c release          # libraries and executables
 - SQL Server authentication, Windows authentication (NTLMv2), Microsoft Entra ID access tokens
 - Encryption: mandatory (default), strict (TDS 8.0), or off; optional certificate trust
 - Named instances resolved through the SQL Browser (UDP 1434)
-- Saved connections with passwords in the login keychain, per‑connection tab colours
+- Saved connections listed by the name the engine reports (`@@SERVERNAME`), with the
+  address and login underneath; passwords in the login keychain, per‑connection tab colours
 - Azure SQL redirection (ENVCHANGE routing) is followed automatically
 
 **Object Explorer**
@@ -154,7 +155,44 @@ swift build -c release          # libraries and executables
 - Query Options dialog for the SET flags, isolation level and row limits
 - Multiple result sets, Messages with clickable error lines, client statistics
 - Actual and estimated execution plans with per‑operator cost and missing‑index hints
+- Live Query Statistics: per‑operator progress, rows against estimate, elapsed, CPU and
+  reads, polled from `sys.dm_exec_query_profiles` while the query is still running
+- Compare two execution plans — the one in the window against a `.sqlplan` from disk or
+  pasted XML — matched operator by operator, with the cost and row deltas that explain
+  why one is slower
+- Results to File (⌃⇧F) in any supported format, and Copy As Markdown, INSERT
+  statements, CSV, TSV, JSON or XML straight from the grid
 - Export to CSV, TSV, JSON, XML, Markdown, HTML, SQL INSERT and XLSX
+- Query history: every statement this app ran, searchable by text, server, database,
+  outcome and time, with its duration and what it returned
+
+**SQL Server Agent**
+- Job Activity Monitor: what is running right now, on which step and for how long, with
+  filters by status, category and name, and an auto‑refresh interval
+- Start a job, start it at a chosen step, stop it, enable or disable it, read its step
+  history and script it as CREATE
+
+**Always On high availability**
+- `Always On High Availability` in the Object Explorer: availability groups, their
+  replicas, databases and listeners, each with its live state on the node
+- Dashboard with the group's replicas, per-database synchronization, send and redo
+  queues, estimated data loss, listeners and the WSFC quorum
+- Health panel: the policy findings SSMS's dashboard raises — suspended data movement,
+  a disconnected replica, an unsynchronized synchronous secondary, an automatic failover
+  target that is not ready, a commit requirement no replica can satisfy
+- Planned and forced failover, suspend and resume data movement, add and remove
+  databases, add, modify and remove replicas and listeners, read-only routing, the
+  seeding grant, group properties, and Script Availability Group as CREATE
+- Every action is shown as T-SQL first and names the instance it has to run on; nothing
+  fails a group over on a mis-click
+- Multi-instance plans: a failover, an added replica, an added database or a group-wide
+  resume is carried out step by step, each step on its own replica. The window holds a
+  connection to every instance the job touches, reusing the ones already open and
+  dialling the rest with the same credentials, and refuses to run a step against an
+  instance whose name does not match the replica it is for
+- A step can be run, skipped, edited before it runs, or the whole remainder run in one
+  go, stopping at the first failure — a forced failover carries its resume steps for
+  every replica it left suspended
 
 **Design and scripting**
 - Table Designer: add, drop and alter columns, defaults, identity and primary keys, with
@@ -298,8 +336,17 @@ docker run -d --platform linux/amd64 --name ssms-mac-test \
 - MARS is not negotiated. Each query window owns its own connection, which is how SSMS
   behaves anyway.
 - The execution plan is a cost‑annotated operator tree, not the SSMS graphical canvas.
-- Always On, Replication, Service Broker and SQL Agent job editing are not implemented;
-  SQL Agent jobs are listed but not editable.
+- Replication, Service Broker and SQL Agent job editing are not implemented; SQL Agent
+  jobs are listed, started, stopped and scripted, but not edited.
+- Live Query Statistics need SQL Server 2014 or later and VIEW SERVER STATE, and they
+  turn the actual execution plan on, because that is what makes the engine profile the
+  request. A query that finishes in milliseconds is over before the first sample.
+- Plan comparison matches operators by their position in the tree rather than by node
+  id, which is what survives a plan that gained or lost an operator.
+- Always On has no creation wizard: an existing group is read and managed in full, but a
+  brand new group is produced as a script to run rather than built by a wizard. Adding a
+  replica, adding databases and failing over are carried out as multi-instance plans,
+  connecting to each replica in turn.
 - The error log viewer needs membership of `securityadmin`, because that is what
   `sp_readerrorlog` requires. It reports the permission error rather than an empty log.
 - Query Store needs SQL Server 2016 or later, and the reports stay empty until the first

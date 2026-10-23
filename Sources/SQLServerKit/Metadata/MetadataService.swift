@@ -158,6 +158,12 @@ public struct MetadataService: Sendable {
                 makeFolder(.columns, parent: node, carryObject: true),
                 makeFolder(.parameters, parent: node, carryObject: true)
             ]
+        case .availabilityGroup:
+            return [
+                makeFolder(.availabilityReplicas, parent: node, carryObject: true),
+                makeFolder(.availabilityDatabases, parent: node, carryObject: true),
+                makeFolder(.availabilityListeners, parent: node, carryObject: true)
+            ]
         case .folder:
             guard let folder = node.folder else { return [] }
             return try await folderChildren(node, folder: folder, options: options, info: info)
@@ -214,6 +220,8 @@ public struct MetadataService: Sendable {
             makeFolder(.databases, parent: node, carryObject: false),
             makeFolder(.security, parent: node, label: "Security", carryObject: false),
             makeFolder(.serverObjects, parent: node, carryObject: false),
+            makeFolder(.alwaysOn, parent: node, label: "Always On High Availability",
+                       isExpandable: supportsAlwaysOn(info), carryObject: false),
             makeFolder(.management, parent: node,
                        isExpandable: !info.isAzureSQLDatabase, carryObject: false)
         ]
@@ -289,6 +297,23 @@ public struct MetadataService: Sendable {
 
         case .management:
             return [makeFolder(.agent, parent: node, label: "SQL Server Agent", carryObject: false)]
+
+        case .alwaysOn:
+            guard supportsAlwaysOn(info) else { return [] }
+            return [makeFolder(.availabilityGroups, parent: node, label: "Availability Groups",
+                               carryObject: false)]
+
+        case .availabilityGroups:
+            return try await availabilityGroupNodes(node, options: options, info: info)
+
+        case .availabilityReplicas:
+            return try await availabilityReplicaNodes(node, options: options, info: info)
+
+        case .availabilityDatabases:
+            return try await availabilityDatabaseNodes(node, options: options, info: info)
+
+        case .availabilityListeners:
+            return try await availabilityListenerNodes(node, options: options, info: info)
 
         case .agent:
             return [makeFolder(.agentJobs, parent: node, label: "Jobs", carryObject: false)]
@@ -1573,6 +1598,169 @@ public struct MetadataService: Sendable {
         }
     }
 
+    // MARK: Always On
+
+    /// Always On is a 2012-and-later, non-Azure feature; the folder is shown but not
+    /// expandable elsewhere, which is what SSMS does.
+    private func supportsAlwaysOn(_ info: ServerInfo) -> Bool {
+        !info.isAzure && (info.majorVersion == 0 || info.majorVersion >= 11)
+    }
+
+    private func availabilityGroupNodes(_ parent: ObjectExplorerNode,
+                                        options: ObjectExplorerOptions,
+                                        info: ServerInfo) async throws -> [ObjectExplorerNode] {
+        guard supportsAlwaysOn(info) else { return [] }
+        let rows = try await rows(CatalogQueries.availabilityGroups(options: options),
+                                  database: serverScope(info))
+        return rows.map { row in
+            let name = row.string("GroupName")
+            let primary = row.string("PrimaryReplica")
+            let health = row.string("SyncHealth")
+            var detail = primary.isEmpty ? "no primary" : "primary: \(primary)"
+            if !health.isEmpty, health.uppercased() != "HEALTHY" {
+                detail += ", \(MetadataLabels.humanized(health))"
+            }
+            return ObjectExplorerNode(
+                id: MetadataNodeID.object(parent.id, .availabilityGroup, schema: nil, name: name),
+                parentID: parent.id,
+                kind: .availabilityGroup,
+                folder: nil,
+                label: name,
+                detail: "(\(detail))",
+                iconName: MetadataIcon.name(for: .availabilityGroup),
+                isExpandable: true,
+                database: nil,
+                schema: nil,
+                name: name,
+                objectID: nil,
+                isSystemObject: false,
+                info: [
+                    "groupId": row.string("GroupId"),
+                    "primaryReplica": primary,
+                    "syncHealth": health,
+                    "isLocalPrimary": row.int("IsLocalPrimary") == 1 ? "1" : "0"
+                ]
+            )
+        }
+    }
+
+    private func availabilityReplicaNodes(_ parent: ObjectExplorerNode,
+                                          options: ObjectExplorerOptions,
+                                          info: ServerInfo) async throws -> [ObjectExplorerNode] {
+        guard let group = parent.name, supportsAlwaysOn(info) else { return [] }
+        let rows = try await rows(
+            CatalogQueries.availabilityReplicas(group: group, options: options),
+            database: serverScope(info))
+        return rows.map { row in
+            let name = row.string("ReplicaName")
+            let role = row.string("RoleDesc")
+            let mode = MetadataLabels.humanized(row.string("AvailabilityMode"))
+            var parts: [String] = []
+            if !role.isEmpty { parts.append(role.capitalized) }
+            if !mode.isEmpty { parts.append(mode) }
+            let connected = row.string("ConnectedState")
+            if !connected.isEmpty, connected.uppercased() != "CONNECTED" {
+                parts.append(MetadataLabels.humanized(connected))
+            }
+            return ObjectExplorerNode(
+                id: MetadataNodeID.object(parent.id, .availabilityReplica, schema: nil, name: name),
+                parentID: parent.id,
+                kind: .availabilityReplica,
+                folder: nil,
+                label: name,
+                detail: parts.isEmpty ? nil : "(\(parts.joined(separator: ", ")))",
+                iconName: MetadataIcon.name(for: .availabilityReplica),
+                isExpandable: false,
+                database: nil,
+                schema: nil,
+                name: name,
+                objectID: nil,
+                isSystemObject: false,
+                info: [
+                    "group": group,
+                    "role": role,
+                    "availabilityMode": row.string("AvailabilityMode"),
+                    "failoverMode": row.string("FailoverMode"),
+                    "connectedState": connected,
+                    "syncHealth": row.string("SyncHealth"),
+                    "isLocal": row.int("IsLocal") == 1 ? "1" : "0"
+                ]
+            )
+        }
+    }
+
+    private func availabilityDatabaseNodes(_ parent: ObjectExplorerNode,
+                                           options: ObjectExplorerOptions,
+                                           info: ServerInfo) async throws -> [ObjectExplorerNode] {
+        guard let group = parent.name, supportsAlwaysOn(info) else { return [] }
+        let rows = try await rows(
+            CatalogQueries.availabilityDatabases(group: group, options: options),
+            database: serverScope(info))
+        return rows.map { row in
+            let name = row.string("DatabaseName")
+            var detail: String?
+            if row.int("IsSuspended") == 1 {
+                detail = "(data movement suspended)"
+            } else if row.int("IsJoined") == 0 {
+                detail = "(not joined on every replica)"
+            }
+            return ObjectExplorerNode(
+                id: MetadataNodeID.object(parent.id, .availabilityDatabase, schema: nil, name: name),
+                parentID: parent.id,
+                kind: .availabilityDatabase,
+                folder: nil,
+                label: name,
+                detail: detail,
+                iconName: MetadataIcon.name(for: .availabilityDatabase),
+                isExpandable: false,
+                database: name,
+                schema: nil,
+                name: name,
+                objectID: nil,
+                isSystemObject: false,
+                info: [
+                    "group": group,
+                    "syncState": row.string("SyncState"),
+                    "isSuspended": row.int("IsSuspended") == 1 ? "1" : "0",
+                    "isJoined": row.int("IsJoined") == 1 ? "1" : "0"
+                ]
+            )
+        }
+    }
+
+    private func availabilityListenerNodes(_ parent: ObjectExplorerNode,
+                                           options: ObjectExplorerOptions,
+                                           info: ServerInfo) async throws -> [ObjectExplorerNode] {
+        guard let group = parent.name, supportsAlwaysOn(info) else { return [] }
+        let rows = try await rows(
+            CatalogQueries.availabilityListeners(group: group, options: options),
+            database: serverScope(info))
+        return rows.map { row in
+            let name = row.string("ListenerName")
+            let port = row.int("ListenerPort")
+            return ObjectExplorerNode(
+                id: MetadataNodeID.object(parent.id, .availabilityListener, schema: nil, name: name),
+                parentID: parent.id,
+                kind: .availabilityListener,
+                folder: nil,
+                label: name,
+                detail: "(port \(port))",
+                iconName: MetadataIcon.name(for: .availabilityListener),
+                isExpandable: false,
+                database: nil,
+                schema: nil,
+                name: name,
+                objectID: nil,
+                isSystemObject: false,
+                info: [
+                    "group": group,
+                    "port": String(port),
+                    "ipConfiguration": row.string("IpConfiguration")
+                ]
+            )
+        }
+    }
+
     // MARK: Search
 
     /// Search hits carry the id they would have inside the tree, so the UI can reveal
@@ -1806,6 +1994,14 @@ private enum MetadataIcon {
         case .databaseUser, .databaseRole, .applicationRole, .login,
              .serverRole, .schema, .credential:
             return "person.crop.circle"
+        case .availabilityGroup:
+            return "arrow.triangle.2.circlepath"
+        case .availabilityReplica:
+            return "externaldrive.connected.to.line.below"
+        case .availabilityDatabase:
+            return "cylinder.split.1x2"
+        case .availabilityListener:
+            return "antenna.radiowaves.left.and.right"
         default:
             return folder
         }
@@ -1866,6 +2062,11 @@ private enum MetadataLabels {
         case .management: return "Management"
         case .agent: return "SQL Server Agent"
         case .agentJobs: return "Jobs"
+        case .alwaysOn: return "Always On High Availability"
+        case .availabilityGroups: return "Availability Groups"
+        case .availabilityReplicas: return "Availability Replicas"
+        case .availabilityDatabases: return "Availability Databases"
+        case .availabilityListeners: return "Availability Group Listeners"
         case .parameters: return "Parameters"
         default: return humanized(kind.rawValue)
         }
@@ -1884,6 +2085,10 @@ private enum MetadataLabels {
         case .sequence: return "Sequence"
         case .trigger: return "Trigger"
         case .column: return "Column"
+        case .availabilityGroup: return "Availability Group"
+        case .availabilityReplica: return "Availability Replica"
+        case .availabilityDatabase: return "Availability Database"
+        case .availabilityListener: return "Availability Group Listener"
         default: return humanized(kind.rawValue)
         }
     }

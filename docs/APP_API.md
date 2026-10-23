@@ -15,10 +15,12 @@ Sources/SSMSMac/
   Editor/         SQLEditorView (NSViewRepresentable), SQLTextView, SQLHighlighter,
                   LineNumberGutter, EditorDump
   Results/        ResultsPaneView, ResultGridView, MessagesView,
-                  ExecutionPlanView, ShowplanParser
+                  ExecutionPlanView, LiveQueryStatsView
+                  (the showplan parser itself lives in SQLServerKit/Query/Showplan)
   Dialogs/        ConnectSheet, ActivityMonitorView, PropertiesViews,
                   BackupRestoreSheets, DataEditorSheet, ImportFlatFileSheet,
-                  SettingsView
+                  SaveResultsSheet, ComparePlansSheet, QueryHistoryView,
+                  AlwaysOnSheet, AlwaysOnEditors, SettingsView
   Support/        Theme, Keychain
 ```
 

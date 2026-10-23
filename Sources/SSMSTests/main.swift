@@ -213,5 +213,7 @@ t.suite("packet framing") {
 exit(runSQLServerKitTests(t, extra: { runner in
     runDiagnosticsTests(runner)
     runCompareTests(runner)
+    runAlwaysOnTests(runner)
+    runPlanTests(runner)
     runBackupTests(runner)
 }))

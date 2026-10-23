@@ -821,6 +821,86 @@ public enum CatalogQueries {
         """)
     }
 
+    // MARK: - Always On
+
+    /// The availability groups known to this instance, for the Always On tree node.
+    public static func availabilityGroups(options: ObjectExplorerOptions) -> String {
+        whenExists("sys.availability_groups", """
+        SELECT \(top(options.maxChildren))
+            ag.name                                            AS GroupName,
+            CONVERT(nvarchar(36), ag.group_id)                 AS GroupId,
+            ISNULL(ags.primary_replica, N'')                   AS PrimaryReplica,
+            ISNULL(ags.synchronization_health_desc, N'')       AS SyncHealth,
+            CASE WHEN ISNULL(ags.primary_replica, N'') =
+                      CAST(SERVERPROPERTY('ServerName') AS nvarchar(256))
+                 THEN 1 ELSE 0 END                             AS IsLocalPrimary
+        FROM sys.availability_groups AS ag
+        LEFT JOIN sys.dm_hadr_availability_group_states AS ags ON ags.group_id = ag.group_id
+        WHERE 1 = 1\(nameFilter("ag.name", options.nameFilter))
+        ORDER BY ag.name;
+        """)
+    }
+
+    public static func availabilityReplicas(group: String,
+                                            options: ObjectExplorerOptions) -> String {
+        whenExists("sys.availability_replicas", """
+        SELECT \(top(options.maxChildren))
+            ar.replica_server_name                             AS ReplicaName,
+            ISNULL(ars.role_desc, N'')                         AS RoleDesc,
+            ISNULL(ar.availability_mode_desc, N'')             AS AvailabilityMode,
+            ISNULL(ar.failover_mode_desc, N'')                 AS FailoverMode,
+            ISNULL(ars.connected_state_desc, N'')              AS ConnectedState,
+            ISNULL(ars.synchronization_health_desc, N'')       AS SyncHealth,
+            CONVERT(int, ISNULL(ars.is_local, 0))              AS IsLocal
+        FROM sys.availability_replicas AS ar
+        JOIN sys.availability_groups AS ag ON ag.group_id = ar.group_id
+        LEFT JOIN sys.dm_hadr_availability_replica_states AS ars
+               ON ars.replica_id = ar.replica_id
+        WHERE ag.name = \(SQLIdentifier.literal(group))\
+        \(nameFilter("ar.replica_server_name", options.nameFilter))
+        ORDER BY CASE WHEN ISNULL(ars.role_desc, N'') = N'PRIMARY' THEN 0 ELSE 1 END,
+                 ar.replica_server_name;
+        """)
+    }
+
+    /// One row per database in the group, collapsed across replicas: the tree lists the
+    /// database once and the dashboard breaks it down per replica.
+    public static func availabilityDatabases(group: String,
+                                             options: ObjectExplorerOptions) -> String {
+        whenExists("sys.dm_hadr_database_replica_cluster_states", """
+        SELECT \(top(options.maxChildren))
+            dcs.database_name                                  AS DatabaseName,
+            MAX(CONVERT(int, ISNULL(drs.is_suspended, 0)))     AS IsSuspended,
+            MIN(CONVERT(int, ISNULL(dcs.is_database_joined, 0))) AS IsJoined,
+            MAX(ISNULL(drs.synchronization_state_desc, N''))   AS SyncState
+        FROM sys.dm_hadr_database_replica_cluster_states AS dcs
+        JOIN sys.availability_replicas AS ar ON ar.replica_id = dcs.replica_id
+        JOIN sys.availability_groups AS ag ON ag.group_id = ar.group_id
+        LEFT JOIN sys.dm_hadr_database_replica_states AS drs
+               ON drs.group_database_id = dcs.group_database_id
+              AND drs.replica_id = dcs.replica_id
+        WHERE ag.name = \(SQLIdentifier.literal(group))\
+        \(nameFilter("dcs.database_name", options.nameFilter))
+        GROUP BY dcs.database_name
+        ORDER BY dcs.database_name;
+        """)
+    }
+
+    public static func availabilityListeners(group: String,
+                                             options: ObjectExplorerOptions) -> String {
+        whenExists("sys.availability_group_listeners", """
+        SELECT \(top(options.maxChildren))
+            l.dns_name                                         AS ListenerName,
+            l.port                                             AS ListenerPort,
+            ISNULL(l.ip_configuration_string_from_cluster, N'') AS IpConfiguration
+        FROM sys.availability_group_listeners AS l
+        JOIN sys.availability_groups AS ag ON ag.group_id = l.group_id
+        WHERE ag.name = \(SQLIdentifier.literal(group))\
+        \(nameFilter("l.dns_name", options.nameFilter))
+        ORDER BY l.dns_name;
+        """)
+    }
+
     // MARK: - Search
 
     /// Object and column name search inside one database, in a single round trip.

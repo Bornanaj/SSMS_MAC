@@ -32,6 +32,10 @@ public struct ConnectionProfile: Codable, Identifiable, Hashable, Sendable {
     public var name: String
     /// Raw text as typed: `host`, `host,1433`, `host\SQLEXPRESS`, `tcp:host,1433`.
     public var server: String
+    /// `@@SERVERNAME` as the engine reported it on the last successful connection.
+    /// Saved connections are listed under this, so an entry typed as an address still
+    /// shows up by the name the server calls itself.
+    public var discoveredServerName: String?
     public var authentication: SQLAuthenticationType
     public var username: String
     public var domain: String
@@ -54,6 +58,7 @@ public struct ConnectionProfile: Codable, Identifiable, Hashable, Sendable {
     public init(id: UUID = UUID(),
                 name: String = "",
                 server: String = "",
+                discoveredServerName: String? = nil,
                 authentication: SQLAuthenticationType = .sqlLogin,
                 username: String = "",
                 domain: String = "",
@@ -74,6 +79,7 @@ public struct ConnectionProfile: Codable, Identifiable, Hashable, Sendable {
         self.id = id
         self.name = name
         self.server = server
+        self.discoveredServerName = discoveredServerName
         self.authentication = authentication
         self.username = username
         self.domain = domain
@@ -95,9 +101,29 @@ public struct ConnectionProfile: Codable, Identifiable, Hashable, Sendable {
 
     public var displayName: String {
         if !name.isEmpty { return name }
+        if let discovered = discoveredServerName, !discovered.isEmpty { return discovered }
         let parsed = TDSConfiguration.parseServerName(server)
         var text = parsed.instance.map { "\(parsed.host)\\\($0)" } ?? parsed.host
         if !username.isEmpty { text += " (\(username))" }
+        return text
+    }
+
+    /// "host\\instance,port · login" — the second line of the saved connection list,
+    /// so the address stays visible once the entry is titled with the server name.
+    public var addressDescription: String {
+        let parsed = TDSConfiguration.parseServerName(server)
+        var text = parsed.instance.map { "\(parsed.host)\\\($0)" } ?? parsed.host
+        if let port = parsed.port, port != 1433 { text += ",\(port)" }
+        if text.isEmpty { text = server }
+        switch authentication {
+        case .sqlLogin, .entraIDPassword:
+            if !username.isEmpty { text += " · \(username)" }
+        case .windows:
+            let account = domain.isEmpty ? username : "\(domain)\\\(username)"
+            if !account.isEmpty { text += " · \(account)" }
+        case .entraIDAccessToken:
+            text += " · access token"
+        }
         return text
     }
 

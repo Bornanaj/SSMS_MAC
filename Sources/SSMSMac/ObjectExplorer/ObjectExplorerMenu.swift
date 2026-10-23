@@ -20,6 +20,8 @@ struct ObjectExplorerMenu: View {
             case .scalarFunction, .tableValuedFunction, .aggregateFunction: functionMenu
             case .index: indexMenu
             case .column: columnMenu
+            case .availabilityGroup, .availabilityReplica, .availabilityDatabase,
+                 .availabilityListener: alwaysOnMenu
             default: genericMenu
             }
         }
@@ -42,6 +44,9 @@ struct ObjectExplorerMenu: View {
         }
         Button("SQL Server Logs…") {
             if let server = app.server(for: node) { app.activeSheet = .errorLog(server.id) }
+        }
+        Button("Always On Dashboard…") {
+            if let server = app.server(for: node) { app.activeSheet = .alwaysOn(server.id, nil) }
         }
         Button("Logins…") {
             if let server = app.server(for: node) { app.activeSheet = .logins(server.id) }
@@ -283,6 +288,45 @@ struct ObjectExplorerMenu: View {
     @ViewBuilder
     private var columnMenu: some View {
         Button("Copy Column Name") {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(node.name ?? node.label, forType: .string)
+        }
+        refreshItem
+    }
+
+    /// The group an Always On node belongs to: its own name on a group, the name its
+    /// children carry otherwise.
+    private var alwaysOnGroupName: String? {
+        node.kind == .availabilityGroup ? node.name : node.info["group"]
+    }
+
+    /// Always On nodes all lead to the dashboard, with their own group preselected:
+    /// failing over and suspending data movement belong next to the state they act on.
+    @ViewBuilder
+    private var alwaysOnMenu: some View {
+        Button("Show Always On Dashboard…") {
+            if let server = app.server(for: node) {
+                app.activeSheet = .alwaysOn(server.id, alwaysOnGroupName)
+            }
+        }
+        if node.kind == .availabilityDatabase, let database = node.name {
+            Button("New Query") { newQuery(database: database) }
+            Button(node.info["isSuspended"] == "1"
+                   ? "Resume Data Movement…" : "Suspend Data Movement…") {
+                if let server = app.server(for: node) {
+                    app.activeSheet = .alwaysOn(server.id, alwaysOnGroupName)
+                }
+            }
+        }
+        if node.kind == .availabilityReplica || node.kind == .availabilityGroup {
+            Button("Failover…") {
+                if let server = app.server(for: node) {
+                    app.activeSheet = .alwaysOn(server.id, alwaysOnGroupName)
+                }
+            }
+        }
+        Divider()
+        Button("Copy Name") {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(node.name ?? node.label, forType: .string)
         }

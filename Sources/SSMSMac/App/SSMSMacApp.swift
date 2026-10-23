@@ -137,6 +137,14 @@ struct AppCommands: Commands {
             Toggle("Display Estimated Execution Plan", isOn: bindingEstimatedPlan)
                 .keyboardShortcut("l", modifiers: [.command, .shift])
 
+            Toggle("Include Live Query Statistics", isOn: bindingLiveStatistics)
+
+            Button("Compare Execution Plans…") {
+                guard let tab = app.selectedTab, let xml = tab.executionPlanXML else { return }
+                app.activeSheet = .comparePlans(tab.displayTitle, xml)
+            }
+            .disabled(app.selectedTab?.executionPlanXML == nil)
+
             Divider()
 
             Picker("Results To", selection: $settings.resultsOutputMode) {
@@ -144,6 +152,12 @@ struct AppCommands: Commands {
                 Text("Results to Text").tag("text")
             }
             .pickerStyle(.inline)
+
+            Button("Results to File…") {
+                if let tab = app.selectedTab { app.activeSheet = .exportResults(tab.id) }
+            }
+            .keyboardShortcut("f", modifiers: [.control, .shift])
+            .disabled(app.selectedTab?.resultSets.isEmpty != false)
 
             Button("Query Options…") { app.activeSheet = .queryOptions }
                 .disabled(app.selectedTab == nil)
@@ -213,6 +227,11 @@ struct AppCommands: Commands {
 
             Button("SQL Server Logs…") {
                 if let server = currentServer { app.activeSheet = .errorLog(server.id) }
+            }
+            .disabled(currentServer == nil)
+
+            Button("Always On Dashboard…") {
+                if let server = currentServer { app.activeSheet = .alwaysOn(server.id, nil) }
             }
             .disabled(currentServer == nil)
 
@@ -359,6 +378,11 @@ struct AppCommands: Commands {
     private var bindingEstimatedPlan: Binding<Bool> {
         Binding(get: { app.selectedTab?.includeEstimatedPlan ?? false },
                 set: { app.selectedTab?.includeEstimatedPlan = $0 })
+    }
+
+    private var bindingLiveStatistics: Binding<Bool> {
+        Binding(get: { app.selectedTab?.includeLiveStatistics ?? false },
+                set: { app.selectedTab?.includeLiveStatistics = $0 })
     }
 
     private func openScript() {

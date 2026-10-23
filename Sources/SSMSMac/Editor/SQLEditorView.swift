@@ -141,6 +141,11 @@ struct SQLEditorView: NSViewRepresentable {
         textView.onBookmarksChanged = { [weak container] lines in
             container?.gutter.bookmarkLines = lines
         }
+        // Completions are computed off the main actor, so the popup is opened by the
+        // answer arriving rather than by the keystroke that asked for it.
+        tab.onCompletionsUpdated = { [weak textView] in
+            textView?.completionsDidUpdate()
+        }
         coordinator.applyAppearance(to: textView, gutter: container.gutter)
         coordinator.highlightAll()
 
@@ -194,6 +199,10 @@ struct SQLEditorView: NSViewRepresentable {
         guard let textView = context.coordinator.textView else { return }
         context.coordinator.tab = tab
         context.coordinator.settings = settings
+        // Re-bound on every pass: the view can be handed a different tab.
+        tab.onCompletionsUpdated = { [weak textView] in
+            textView?.completionsDidUpdate()
+        }
 
         if textView.string != tab.text && !context.coordinator.isEditing {
             let selected = textView.selectedRange()
@@ -309,14 +318,20 @@ struct SQLEditorView: NSViewRepresentable {
 
         func sqlTextViewDidChangeCaret(_ textView: SQLTextView) {
             guard settings.intelliSenseEnabled else { return }
-            tab.requestCompletions(at: textView.selectedRange().location)
+            // The text view's own string is used: `tab.text` is only updated after
+            // AppKit finishes the edit, so it trails the caret by one character.
+            tab.requestCompletions(script: textView.string,
+                                   at: textView.selectedRange().location)
         }
 
         /// Candidates for the caret's context. Ranking and filtering happen in the
         /// text view, which owns the query string as the user types.
         func sqlTextViewCompletionCandidates(_ textView: SQLTextView) -> [CompletionItem] {
             guard settings.intelliSenseEnabled else { return [] }
-            return tab.completionItems.isEmpty ? Coordinator.keywordFallback : tab.completionItems
+            if !tab.completionItems.isEmpty { return tab.completionItems }
+            // After "alias." or "schema." a keyword list is simply the wrong answer,
+            // so nothing is offered until the catalog can answer properly.
+            return tab.completionIsMemberContext ? [] : Coordinator.keywordFallback
         }
 
         func sqlTextViewDidRequestExpandWildcards(_ textView: SQLTextView) {

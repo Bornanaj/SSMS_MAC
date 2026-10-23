@@ -15,7 +15,9 @@ struct QueryWindowView: View {
             if tab.showResultsPane {
                 VSplitView {
                     editor.frame(minHeight: 120)
-                    ResultsPaneView(tab: tab, settings: settings, onJumpToLine: jump(toLine:))
+                    ResultsPaneView(tab: tab, settings: settings,
+                                    onJumpToLine: jump(toLine:),
+                                    onSaveResults: { app.activeSheet = .exportResults(tab.id) })
                         .frame(minHeight: 120, idealHeight: 260)
                 }
             } else {

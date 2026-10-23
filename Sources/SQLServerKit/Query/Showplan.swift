@@ -1,33 +1,33 @@
 import Foundation
 
 /// One physical operator in an execution plan.
-struct PlanNode: Identifiable, Hashable {
-    let id = UUID()
-    var nodeID: Int = 0
-    var physicalOp: String = ""
-    var logicalOp: String = ""
-    var estimateRows: Double = 0
-    var actualRows: Double?
-    var actualExecutions: Double?
-    var estimateIO: Double = 0
-    var estimateCPU: Double = 0
-    var estimatedTotalSubtreeCost: Double = 0
-    var averageRowSize: Double = 0
-    var isParallel = false
-    var objectName: String?
-    var indexName: String?
-    var predicate: String?
-    var seekPredicate: String?
-    var outputList: [String] = []
-    var warnings: [String] = []
-    var children: [PlanNode] = []
+public struct PlanNode: Identifiable, Hashable, Sendable {
+    public let id = UUID()
+    public var nodeID: Int = 0
+    public var physicalOp: String = ""
+    public var logicalOp: String = ""
+    public var estimateRows: Double = 0
+    public var actualRows: Double?
+    public var actualExecutions: Double?
+    public var estimateIO: Double = 0
+    public var estimateCPU: Double = 0
+    public var estimatedTotalSubtreeCost: Double = 0
+    public var averageRowSize: Double = 0
+    public var isParallel = false
+    public var objectName: String?
+    public var indexName: String?
+    public var predicate: String?
+    public var seekPredicate: String?
+    public var outputList: [String] = []
+    public var warnings: [String] = []
+    public var children: [PlanNode] = []
 
     /// Cost of this operator alone, i.e. subtree cost minus the children's subtrees.
-    var operatorCost: Double {
+    public var operatorCost: Double {
         max(0, estimatedTotalSubtreeCost - children.reduce(0) { $0 + $1.estimatedTotalSubtreeCost })
     }
 
-    var symbol: String {
+    public var symbol: String {
         let op = physicalOp.lowercased()
         if op.contains("clustered index scan") || op.contains("table scan") { return "doc.text.magnifyingglass" }
         if op.contains("index seek") { return "scope" }
@@ -47,23 +47,21 @@ struct PlanNode: Identifiable, Hashable {
     }
 }
 
-struct PlanStatement: Identifiable, Hashable {
-    let id = UUID()
-    var statementText: String = ""
-    var subtreeCost: Double = 0
-    var estimatedRows: Double = 0
-    var root: PlanNode?
-    var missingIndexImpact: Double?
-    var missingIndexDefinition: String?
+public struct PlanStatement: Identifiable, Hashable, Sendable {
+    public let id = UUID()
+    public var statementText: String = ""
+    public var subtreeCost: Double = 0
+    public var estimatedRows: Double = 0
+    public var root: PlanNode?
+    public var missingIndexImpact: Double?
+    public var missingIndexDefinition: String?
 }
 
 /// Parses SHOWPLAN_XML / STATISTICS XML output into an operator tree.
-enum ShowplanParser {
+public enum ShowplanParser {
 
-    static func parse(_ xml: String) -> [PlanStatement] {
-        guard let document = try? XMLDocument(xmlString: xml, options: [.nodePreserveWhitespace]) else {
-            return []
-        }
+    public static func parse(_ xml: String) -> [PlanStatement] {
+        guard let document = parseDocument(xml) else { return [] }
         guard let root = document.rootElement() else { return [] }
 
         var statements: [PlanStatement] = []
@@ -86,6 +84,23 @@ enum ShowplanParser {
             statements.append(statement)
         }
         return statements
+    }
+
+    /// A plan read from the server arrives as bare XML, but a `.sqlplan` saved by SSMS
+    /// starts with `<?xml version="1.0" encoding="utf-16"?>`. Once the file has been
+    /// decoded into a String that declaration is a lie, and the parser refuses the
+    /// document over it — so on a failure the declaration is dropped and the body is
+    /// parsed on its own.
+    private static func parseDocument(_ xml: String) -> XMLDocument? {
+        if let document = try? XMLDocument(xmlString: xml, options: [.nodePreserveWhitespace]) {
+            return document
+        }
+        let trimmed = xml.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("<?xml"), let end = trimmed.range(of: "?>") else { return nil }
+        let body = String(trimmed[end.upperBound...])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty else { return nil }
+        return try? XMLDocument(xmlString: body, options: [.nodePreserveWhitespace])
     }
 
     private static func parseRelOp(_ element: XMLElement) -> PlanNode {

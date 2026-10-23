@@ -74,6 +74,7 @@ final class AppState: ObservableObject {
         case databaseSecurity(UUID, String)
         case permissions(UUID, String, String?, String?)
         case agentJobs(UUID)
+        case alwaysOn(UUID, String?)
         case reports(UUID, String?)
         case serverProperties(UUID)
         case registeredServers
@@ -81,6 +82,7 @@ final class AppState: ObservableObject {
         case queryStore(UUID, String?)
         case errorLog(UUID)
         case executionPlan(String, String)
+        case comparePlans(String, String)
 
         var id: String {
             switch self {
@@ -109,6 +111,7 @@ final class AppState: ObservableObject {
             case .permissions(let s, let d, let sc, let o):
                 return "perms-\(s)-\(d)-\(sc ?? "")-\(o ?? "")"
             case .agentJobs(let s): return "agent-\(s)"
+            case .alwaysOn(let s, let group): return "alwayson-\(s)-\(group ?? "")"
             case .reports(let s, let d): return "reports-\(s)-\(d ?? "")"
             case .serverProperties(let s): return "serverprops-\(s)"
             case .registeredServers: return "registeredservers"
@@ -117,6 +120,7 @@ final class AppState: ObservableObject {
             case .queryStore(let s, let d): return "querystore-\(s)-\(d ?? "")"
             case .errorLog(let s): return "errorlog-\(s)"
             case .executionPlan(let title, _): return "plan-\(title)"
+            case .comparePlans(let title, _): return "planCompare-\(title)"
             }
         }
     }
@@ -150,9 +154,13 @@ final class AppState: ObservableObject {
                                                              password: password,
                                                              accessToken: accessToken)
             let info = await session.serverInfo
-            let server = ConnectedServer(session: session, profile: profile, serverInfo: info)
+            // The engine's own name is what the saved connection is listed under from
+            // now on; the address stays in the profile as the second line.
+            var saved = profile
+            if !info.serverName.isEmpty { saved.discoveredServerName = info.serverName }
+            let server = ConnectedServer(session: session, profile: saved, serverInfo: info)
             servers.append(server)
-            if persist { connections.save(profile, password: password) }
+            if persist { connections.save(saved, password: password) }
             await explorer.addServer(session: session)
             statusMessage = "Connected to \(info.serverName)."
 
@@ -185,6 +193,12 @@ final class AppState: ObservableObject {
         untitledCounter += 1
         tab.maxRows = settings.gridMaxRows
         tab.timeoutSeconds = settings.executionTimeoutSeconds
+        // Every finished run lands in the history browser, with what it returned and
+        // how long it took.
+        history.limit = max(1, settings.queryHistoryLimit)
+        tab.onExecutionRecorded = { [weak self] entry in
+            self?.history.record(entry)
+        }
         tabs.append(tab)
         selectedTabID = tab.id
         if let server {

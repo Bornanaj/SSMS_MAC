@@ -40,6 +40,10 @@ public enum ObjectNodeKind: String, Codable, Sendable, Hashable, CaseIterable {
     case partitionFunction
     case partitionScheme
     case agentJob
+    case availabilityGroup
+    case availabilityReplica
+    case availabilityDatabase
+    case availabilityListener
     case externalTable
     case securityPolicy
     case unknown
@@ -108,6 +112,10 @@ public enum ObjectFolderKind: String, Codable, Sendable, Hashable, CaseIterable 
     case agentJobs
     case replication
     case alwaysOn
+    case availabilityGroups
+    case availabilityReplicas
+    case availabilityDatabases
+    case availabilityListeners
     case parameters
     case securityPolicies
 }

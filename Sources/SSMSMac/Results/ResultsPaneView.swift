@@ -8,8 +8,9 @@ struct ResultsPaneView: View {
     @ObservedObject var tab: QueryTab
     @ObservedObject var settings: AppSettings
     var onJumpToLine: (Int) -> Void
+    /// Opens the Save Results dialog; the pane itself owns no sheet state.
+    var onSaveResults: () -> Void
 
-    @State private var exportTarget: ResultSetModel?
     @State private var preferences = QueryResultsPreferences.load()
 
     private var outputMode: QueryOutputMode {
@@ -23,22 +24,6 @@ struct ResultsPaneView: View {
             content
         }
         .background(Color(nsColor: .textBackgroundColor))
-        .fileExporter(isPresented: Binding(
-            get: { exportTarget != nil },
-            set: { if !$0 { exportTarget = nil } }
-        ), document: exportDocument, contentType: .commaSeparatedText, defaultFilename: "results") { _ in
-            exportTarget = nil
-        }
-    }
-
-    private var exportDocument: ResultsCSVDocument {
-        guard let model = exportTarget else { return ResultsCSVDocument(text: "") }
-        let exporter = ResultExporter()
-        var options = ExportOptions()
-        options.includeHeaders = true
-        let text = (try? exporter.string(columns: model.columns, rows: model.rows,
-                                         format: .csv, options: options)) ?? ""
-        return ResultsCSVDocument(text: text)
     }
 
     private var tabBar: some View {
@@ -75,6 +60,15 @@ struct ResultsPaneView: View {
                     .foregroundStyle(.secondary)
             }
 
+            Button {
+                onSaveResults()
+            } label: {
+                Image(systemName: "square.and.arrow.down")
+            }
+            .buttonStyle(.plain)
+            .disabled(tab.resultSets.isEmpty)
+            .help("Save results to a file")
+
             Menu {
                 Picker("Output", selection: $settings.resultsOutputMode) {
                     Text("Results to Grid").tag("grid")
@@ -106,6 +100,8 @@ struct ResultsPaneView: View {
         case .results: return true
         case .messages: return true
         case .executionPlan: return tab.executionPlanXML != nil
+        case .liveStatistics: return tab.includeLiveStatistics
+            || !tab.liveSnapshot.isEmpty || tab.liveStatisticsMessage != nil
         case .clientStatistics: return tab.summary != nil
         }
     }
@@ -152,6 +148,9 @@ struct ResultsPaneView: View {
             } else {
                 ContentUnavailableView("No execution plan", systemImage: "chart.xyaxis.line")
             }
+
+        case .liveStatistics:
+            LiveQueryStatsView(tab: tab)
 
         case .clientStatistics:
             clientStatistics
@@ -206,9 +205,9 @@ struct ResultsPaneView: View {
                         .foregroundStyle(.secondary)
                     Spacer()
                     Button {
-                        exportTarget = model
+                        onSaveResults()
                     } label: {
-                        Label("Save as CSV", systemImage: "square.and.arrow.down")
+                        Label("Save Results As…", systemImage: "square.and.arrow.down")
                     }
                     .buttonStyle(.plain)
                     .font(.caption)

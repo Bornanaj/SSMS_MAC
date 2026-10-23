@@ -1,8 +1,9 @@
 import SwiftUI
 import SQLServerKit
 
-/// The SQL Server Agent > Jobs node: what is scheduled, what it did last time, and the
-/// controls to start, stop and enable it.
+/// SQL Server Agent's Jobs node and its Job Activity Monitor in one window: what is
+/// scheduled, what is running right now and on which step, what each job did last time,
+/// and the controls to start (optionally at a chosen step), stop, enable and script it.
 struct AgentJobsSheet: View {
     @Environment(\.dismiss) private var dismiss
     let server: ConnectedServer
@@ -19,6 +20,35 @@ struct AgentJobsSheet: View {
         }
     }
 
+    /// The Job Activity Monitor's status filter, same buckets SSMS offers.
+    private enum StatusFilter: String, CaseIterable, Identifiable {
+        case all, running, failed, idle, disabled, scheduled
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .all: return "All"
+            case .running: return "Running"
+            case .failed: return "Failed"
+            case .idle: return "Idle"
+            case .disabled: return "Disabled"
+            case .scheduled: return "Scheduled"
+            }
+        }
+
+        func matches(_ job: AgentJob) -> Bool {
+            switch self {
+            case .all: return true
+            case .running: return job.isRunning
+            case .failed: return job.lastRunOutcome == "Failed"
+            case .idle: return !job.isRunning
+            case .disabled: return !job.isEnabled
+            case .scheduled: return job.isScheduled
+            }
+        }
+    }
+
     @State private var jobs: [AgentJob] = []
     @State private var selection: String?
     @State private var detail: Detail = .steps
@@ -28,6 +58,10 @@ struct AgentJobsSheet: View {
     @State private var selectedStep: Int?
     @State private var selectedHistory: Int?
     @State private var search = ""
+    @State private var statusFilter: StatusFilter = .all
+    @State private var category: String = ""
+    /// 0 means off. The Job Activity Monitor is only useful if it keeps up with the jobs.
+    @State private var autoRefreshSeconds = 0
     @State private var isBusy = false
     @State private var status: String?
     @State private var isError = false
@@ -35,11 +69,19 @@ struct AgentJobsSheet: View {
     @State private var pendingScript: PendingScript?
 
     private var visible: [AgentJob] {
-        guard !search.isEmpty else { return jobs }
-        return jobs.filter {
-            $0.name.localizedCaseInsensitiveContains(search)
-                || $0.category.localizedCaseInsensitiveContains(search)
+        jobs.filter { job in
+            guard statusFilter.matches(job) else { return false }
+            if !category.isEmpty,
+               job.category.caseInsensitiveCompare(category) != .orderedSame { return false }
+            guard !search.isEmpty else { return true }
+            return job.name.localizedCaseInsensitiveContains(search)
+                || job.category.localizedCaseInsensitiveContains(search)
+                || job.owner.localizedCaseInsensitiveContains(search)
         }
+    }
+
+    private var categories: [String] {
+        Array(Set(jobs.map(\.category).filter { !$0.isEmpty })).sorted()
     }
 
     private var selected: AgentJob? {
@@ -49,7 +91,8 @@ struct AgentJobsSheet: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            SecurityHeader(icon: "clock.badge.checkmark", title: "SQL Server Agent Jobs",
+            SecurityHeader(icon: "clock.badge.checkmark",
+                           title: "SQL Server Agent — Job Activity",
                            subtitle: server.displayName, isBusy: isBusy)
             Divider()
             if !agentRunning {
@@ -75,6 +118,7 @@ struct AgentJobsSheet: View {
         .task { await load() }
         .task(id: selection) { await loadDetail() }
         .task(id: detail) { await loadDetail() }
+        .task(id: autoRefreshSeconds) { await autoRefresh() }
         .sheet(item: $pendingScript) { pending in
             ScriptConfirmSheet(pending: pending) { script in
                 await runScript(script)
@@ -84,10 +128,24 @@ struct AgentJobsSheet: View {
 
     private var toolbar: some View {
         HStack(spacing: 8) {
-            Button {
-                guard let job = selected else { return }
-                Task { await start(job) }
+            Menu {
+                Button("Start Job") {
+                    guard let job = selected else { return }
+                    Task { await start(job) }
+                }
+                if !steps.isEmpty {
+                    Menu("Start at Step") {
+                        ForEach(steps) { step in
+                            Button("\(step.stepID). \(step.name)") {
+                                guard let job = selected else { return }
+                                Task { await start(job, stepName: step.name) }
+                            }
+                        }
+                    }
+                }
             } label: { Label("Start", systemImage: "play.fill") }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
                 .disabled(selected == nil || selected?.isRunning == true)
 
             Button {
@@ -125,9 +183,41 @@ struct AgentJobsSheet: View {
                 .disabled(selected == nil)
 
             Spacer()
+
+            Picker("", selection: $statusFilter) {
+                ForEach(StatusFilter.allCases) { Text($0.title).tag($0) }
+            }
+            .labelsHidden()
+            .fixedSize()
+
+            Picker("", selection: $category) {
+                Text("Every category").tag("")
+                ForEach(categories, id: \.self) { Text($0).tag($0) }
+            }
+            .labelsHidden()
+            .fixedSize()
+
             TextField("Search", text: $search)
                 .textFieldStyle(.roundedBorder)
-                .frame(width: 180)
+                .frame(width: 150)
+
+            Menu {
+                Picker("Refresh", selection: $autoRefreshSeconds) {
+                    Text("Manual").tag(0)
+                    Text("Every 5 seconds").tag(5)
+                    Text("Every 10 seconds").tag(10)
+                    Text("Every 30 seconds").tag(30)
+                    Text("Every minute").tag(60)
+                }
+                .pickerStyle(.inline)
+            } label: {
+                Image(systemName: autoRefreshSeconds == 0
+                      ? "arrow.clockwise" : "arrow.clockwise.circle.fill")
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("Auto-refresh interval")
+
             Button { Task { await load() } } label: { Image(systemName: "arrow.clockwise") }
         }
         .padding(8)
@@ -150,8 +240,19 @@ struct AgentJobsSheet: View {
                 .foregroundStyle(job.isEnabled ? Color.primary : Color.secondary)
             }.width(min: 160, ideal: 220)
 
-            TableColumn("Enabled") { Text($0.isEnabled ? "Yes" : "No") }.width(70)
-            TableColumn("Category") { Text($0.category) }.width(130)
+            TableColumn("Status") { job in
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(job.isRunning ? "Executing" : (job.isEnabled ? "Idle" : "Disabled"))
+                        .foregroundStyle(job.isRunning ? Color.accentColor
+                                         : (job.isEnabled ? Color.primary : Color.secondary))
+                    if job.isRunning, !job.currentStepName.isEmpty {
+                        Text(job.currentStepName).font(.caption2).foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+            }.width(min: 90, ideal: 130)
+            TableColumn("Running for") { Text($0.runningForText).monospacedDigit() }.width(90)
+            TableColumn("Category") { Text($0.category) }.width(120)
             TableColumn("Last run") { Text($0.lastRunAt) }.width(150)
             TableColumn("Duration") { Text($0.lastRunDuration).monospacedDigit() }.width(80)
             TableColumn("Outcome") { job in
@@ -264,9 +365,11 @@ struct AgentJobsSheet: View {
 
     // MARK: - Actions
 
-    private func start(_ job: AgentJob) async {
-        await perform("Started \(job.name).") {
-            try await AgentService(session: server.session).startJob(name: job.name)
+    private func start(_ job: AgentJob, stepName: String? = nil) async {
+        let where_ = stepName.map { " at step \($0)" } ?? ""
+        await perform("Started \(job.name)\(where_).") {
+            try await AgentService(session: server.session).startJob(name: job.name,
+                                                                     stepName: stepName)
         }
     }
 
@@ -313,9 +416,12 @@ struct AgentJobsSheet: View {
             jobs = try await service.jobs()
             isError = false
             let running = jobs.filter(\.isRunning).count
-            status = running > 0
-                ? "\(jobs.count) jobs, \(running) running."
-                : "\(jobs.count) jobs."
+            let failed = jobs.filter { $0.lastRunOutcome == "Failed" }.count
+            var parts = ["\(jobs.count) jobs"]
+            if visible.count != jobs.count { parts.append("\(visible.count) shown") }
+            if running > 0 { parts.append("\(running) running") }
+            if failed > 0 { parts.append("\(failed) failed last run") }
+            status = parts.joined(separator: ", ") + "."
         } catch {
             isError = true
             status = String(describing: error)
@@ -330,8 +436,11 @@ struct AgentJobsSheet: View {
         }
         let service = AgentService(session: server.session)
         do {
+            // Steps load whichever tab is showing: "Start at Step" needs them, and a
+            // job's step list is a handful of rows.
+            steps = try await service.steps(jobID: job.id)
             switch detail {
-            case .steps: steps = try await service.steps(jobID: job.id)
+            case .steps: break
             case .schedules: schedules = try await service.schedules(jobID: job.id)
             case .history: history = try await service.history(jobID: job.id)
             }
@@ -339,6 +448,18 @@ struct AgentJobsSheet: View {
         } catch {
             isError = true
             status = String(describing: error)
+        }
+    }
+
+    /// Keeps the list current while it is open, the way the Job Activity Monitor does.
+    /// The task is torn down when the interval changes or the sheet closes.
+    private func autoRefresh() async {
+        guard autoRefreshSeconds > 0 else { return }
+        while !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: UInt64(autoRefreshSeconds) * 1_000_000_000)
+            guard !Task.isCancelled else { return }
+            await load()
+            await loadDetail()
         }
     }
 }

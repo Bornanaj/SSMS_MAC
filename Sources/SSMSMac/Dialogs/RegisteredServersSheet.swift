@@ -353,6 +353,13 @@ struct MultiServerQuerySheet: View {
             do {
                 let session = try await SQLServerSession.connect(profile: profile,
                                                                  password: password)
+                let info = await session.serverInfo
+                if !info.serverName.isEmpty {
+                    // Learn the engine's own name, so the saved connection stops being
+                    // listed under the address it was reached by.
+                    app.connections.recordServerName(info.serverName, for: profile.id)
+                    outcome.serverName = info.serverName
+                }
                 let connection = try await session.openConnection()
                 let result = try await connection.query(script)
                 try? await connection.close()
