@@ -74,6 +74,8 @@ final class BackupWizardModel: ObservableObject {
         var options = BackupOptions()
         options.compressionLevel = capabilities.canCompress ? 1 : 0
         options.checksum = true
+        var types: Set<BackupType> = [.full]
+        var schedules: [BackupType: [BackupSchedule]] = [:]
         let today = window.serverNow
         switch mode {
         case .edit(let job):
@@ -88,7 +90,10 @@ final class BackupWizardModel: ObservableObject {
         case .backUpNow:
             options.databases = database.map { .databases([$0]) } ?? DatabaseSelection()
         }
+        // Every stored property must be set before the published ones can be assigned through self.
         self.options = options
+        self.types = types
+        self.schedules = schedules
     }
 
     var isEditing: Bool {

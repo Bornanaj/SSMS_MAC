@@ -104,12 +104,24 @@ public struct DatabaseBackupStatus: Identifiable, Hashable, Sendable {
         guard let full = [lastFull, lastDifferential].compactMap({ $0 }).max() else { return .never }
         let hours = now.timeIntervalSince(full) / 3600
         if hours > Double(thresholds.fullBackupHours) { return .overdue }
-        if recoveryModel.uppercased() != "SIMPLE", !isReadOnly {
+        // System databases are not log backed up, even when the model database is in full recovery.
+        if recoveryModel.uppercased() != "SIMPLE", !isReadOnly, !isSystem {
             guard let log = lastLog else { return .overdue }
             if now.timeIntervalSince(log) / 60 > Double(thresholds.logBackupMinutes) { return .overdue }
         }
         if hours > Double(thresholds.fullBackupHours) * 0.75 { return .warning }
         return .ok
+    }
+}
+
+extension DatabaseBackupStatus {
+    /// A database described by hand, for previews and tests; the reader fills the rest from the server.
+    public init(name: String, databaseID: Int = 5, stateDescription: String = "ONLINE", recoveryModel: String = "FULL",
+                lastFull: Date? = nil, lastDifferential: Date? = nil, lastLog: Date? = nil) {
+        self.init(name: name, databaseID: databaseID, stateDescription: stateDescription, recoveryModel: recoveryModel,
+                  isReadOnly: false, isStandby: false, isSnapshot: false, hasDifferentialBase: lastFull != nil,
+                  hasLogChain: lastFull != nil, sizeMB: 0, lastFull: lastFull, lastDifferential: lastDifferential,
+                  lastLog: lastLog, availabilityGroup: "")
     }
 }
 

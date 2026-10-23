@@ -139,7 +139,8 @@ public struct BackupRunner: Sendable {
         return Self.resolve(options.databases, type: options.type, statuses: statuses)
     }
 
-    static func resolve(_ selection: DatabaseSelection, type: BackupType,
+    /// The databases a selection stands for, each with the reason it cannot be backed up, if any.
+    public static func resolve(_ selection: DatabaseSelection, type: BackupType,
                         statuses: [DatabaseBackupStatus]) -> [(name: String, skipReason: String?)] {
         let excluded = Set(selection.excluded.map { $0.lowercased() })
         let byName = Dictionary(statuses.map { ($0.name.lowercased(), $0) }, uniquingKeysWith: { first, _ in first })
