@@ -18,7 +18,6 @@ struct ScriptPlanLaunch: Identifiable {
 /// what makes a real failover possible from here: the `FAILOVER` runs on the replica
 /// taking over, not on whichever node this window happens to be attached to.
 struct ScriptPlanSheet: View {
-    @EnvironmentObject var app: AppState
     @Environment(\.dismiss) private var dismiss
 
     let launch: ScriptPlanLaunch
@@ -33,6 +32,7 @@ struct ScriptPlanSheet: View {
     @State private var editedScript = ""
     @State private var confirmRunAll = false
 
+    @MainActor
     init(launch: ScriptPlanLaunch, app: AppState, templatePassword: String) {
         self.launch = launch
         _plan = State(initialValue: launch.plan)

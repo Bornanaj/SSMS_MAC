@@ -185,6 +185,14 @@ swift build -c release          # libraries and executables
   seeding grant, group properties, and Script Availability Group as CREATE
 - Every action is shown as T-SQL first and names the instance it has to run on; nothing
   fails a group over on a mis-click
+- Multi-instance plans: a failover, an added replica, an added database or a group-wide
+  resume is carried out step by step, each step on its own replica. The window holds a
+  connection to every instance the job touches, reusing the ones already open and
+  dialling the rest with the same credentials, and refuses to run a step against an
+  instance whose name does not match the replica it is for
+- A step can be run, skipped, edited before it runs, or the whole remainder run in one
+  go, stopping at the first failure — a forced failover carries its resume steps for
+  every replica it left suspended
 
 **Design and scripting**
 - Table Designer: add, drop and alter columns, defaults, identity and primary keys, with
@@ -336,9 +344,9 @@ docker run -d --platform linux/amd64 --name ssms-mac-test \
 - Plan comparison matches operators by their position in the tree rather than by node
   id, which is what survives a plan that gained or lost an operator.
 - Always On has no creation wizard: an existing group is read and managed in full, but a
-  new group, replica or listener is produced as a script to run rather than built by a
-  wizard. Failover runs on the replica taking over, so a failover started from a session
-  connected elsewhere is scripted for that instance instead of being run here.
+  brand new group is produced as a script to run rather than built by a wizard. Adding a
+  replica, adding databases and failing over are carried out as multi-instance plans,
+  connecting to each replica in turn.
 - The error log viewer needs membership of `securityadmin`, because that is what
   `sp_readerrorlog` requires. It reports the permission error rather than an empty log.
 - Query Store needs SQL Server 2016 or later, and the reports stay empty until the first

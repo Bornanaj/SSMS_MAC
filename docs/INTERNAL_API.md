@@ -165,3 +165,51 @@ public enum QueryEvent
 
 Node ids are path strings: `"<sessionUUID>/db:AdventureWorks/folder:tables/table:dbo.Person"`.
 Build them with a helper in your own file; keep them stable across refreshes.
+
+## Multi-instance script plans
+
+Availability group work spans instances, so SQLServerKit carries a plan type rather
+than assuming one connection:
+
+```swift
+public struct ScriptStep: Sendable, Hashable, Identifiable {
+    public var id: UUID
+    public var title: String
+    public var instance: String        // the engine's name for the target replica
+    public var database: String        // "master" unless the statement needs otherwise
+    public var script: String
+    public var detail: String
+    public var continuesOnFailure: Bool
+    public var isReadOnly: Bool
+}
+
+public struct ScriptPlan: Sendable, Hashable {
+    public var title: String
+    public var summary: String
+    public var steps: [ScriptStep]
+    public var outcomes: [UUID: ScriptStepOutcome]
+    public var stopsOnFailure: Bool
+    public var instances: [String]              // distinct, in the order needed
+    public func nextRunnableIndex() -> Int?
+    public func state(of: ScriptStep) -> ScriptStepState
+    public mutating func record(_: ScriptStepOutcome, for: ScriptStep)
+}
+
+public enum ScriptStepRunner {
+    public static func run(_ step: ScriptStep, on session: SQLServerSession) async
+        -> ScriptStepOutcome
+}
+
+public enum AvailabilityGroupPlans {
+    public static func failover(group:target:replicas:databases:allowDataLoss:) throws -> ScriptPlan
+    public static func addReplica(group:replica:supportsSeeding:) throws -> ScriptPlan
+    public static func addDatabases(group:databases:replicas:) throws -> ScriptPlan
+    public static func resumeEverywhere(group:databases:) throws -> ScriptPlan
+}
+```
+
+Sequencing is the caller's: the runner executes one step on one session, and the app's
+`ScriptPlanSheet` decides whether to take the next one. `ReplicaConnectionBroker`
+(SSMSMac) resolves a step's instance to a session — reusing one the app already holds,
+otherwise connecting with the credentials of the connection the plan came from — and
+closes only the sessions it opened itself.
