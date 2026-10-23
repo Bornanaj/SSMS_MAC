@@ -155,7 +155,22 @@ swift build -c release          # libraries and executables
 - Query Options dialog for the SET flags, isolation level and row limits
 - Multiple result sets, Messages with clickable error lines, client statistics
 - Actual and estimated execution plans with per‑operator cost and missing‑index hints
+- Live Query Statistics: per‑operator progress, rows against estimate, elapsed, CPU and
+  reads, polled from `sys.dm_exec_query_profiles` while the query is still running
+- Compare two execution plans — the one in the window against a `.sqlplan` from disk or
+  pasted XML — matched operator by operator, with the cost and row deltas that explain
+  why one is slower
+- Results to File (⌃⇧F) in any supported format, and Copy As Markdown, INSERT
+  statements, CSV, TSV, JSON or XML straight from the grid
 - Export to CSV, TSV, JSON, XML, Markdown, HTML, SQL INSERT and XLSX
+- Query history: every statement this app ran, searchable by text, server, database,
+  outcome and time, with its duration and what it returned
+
+**SQL Server Agent**
+- Job Activity Monitor: what is running right now, on which step and for how long, with
+  filters by status, category and name, and an auto‑refresh interval
+- Start a job, start it at a chosen step, stop it, enable or disable it, read its step
+  history and script it as CREATE
 
 **Always On high availability**
 - `Always On High Availability` in the Object Explorer: availability groups, their
@@ -314,7 +329,12 @@ docker run -d --platform linux/amd64 --name ssms-mac-test \
   behaves anyway.
 - The execution plan is a cost‑annotated operator tree, not the SSMS graphical canvas.
 - Replication, Service Broker and SQL Agent job editing are not implemented; SQL Agent
-  jobs are listed but not editable.
+  jobs are listed, started, stopped and scripted, but not edited.
+- Live Query Statistics need SQL Server 2014 or later and VIEW SERVER STATE, and they
+  turn the actual execution plan on, because that is what makes the engine profile the
+  request. A query that finishes in milliseconds is over before the first sample.
+- Plan comparison matches operators by their position in the tree rather than by node
+  id, which is what survives a plan that gained or lost an operator.
 - Always On has no creation wizard: an existing group is read and managed in full, but a
   new group, replica or listener is produced as a script to run rather than built by a
   wizard. Failover runs on the replica taking over, so a failover started from a session

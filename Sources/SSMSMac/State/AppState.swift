@@ -82,6 +82,7 @@ final class AppState: ObservableObject {
         case queryStore(UUID, String?)
         case errorLog(UUID)
         case executionPlan(String, String)
+        case comparePlans(String, String)
 
         var id: String {
             switch self {
@@ -119,6 +120,7 @@ final class AppState: ObservableObject {
             case .queryStore(let s, let d): return "querystore-\(s)-\(d ?? "")"
             case .errorLog(let s): return "errorlog-\(s)"
             case .executionPlan(let title, _): return "plan-\(title)"
+            case .comparePlans(let title, _): return "planCompare-\(title)"
             }
         }
     }
@@ -191,6 +193,12 @@ final class AppState: ObservableObject {
         untitledCounter += 1
         tab.maxRows = settings.gridMaxRows
         tab.timeoutSeconds = settings.executionTimeoutSeconds
+        // Every finished run lands in the history browser, with what it returned and
+        // how long it took.
+        history.limit = max(1, settings.queryHistoryLimit)
+        tab.onExecutionRecorded = { [weak self] entry in
+            self?.history.record(entry)
+        }
         tabs.append(tab)
         selectedTabID = tab.id
         if let server {

@@ -1,4 +1,5 @@
 import SwiftUI
+import SQLServerKit
 
 /// Renders a SHOWPLAN tree. Not a pixel copy of the SSMS graphical plan, but it shows
 /// the same information: operator, relative cost, estimated vs actual rows, and the

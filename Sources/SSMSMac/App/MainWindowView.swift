@@ -256,10 +256,14 @@ struct MainWindowView: View {
             }
         case .executionPlan(let title, let xml):
             PlanPreviewSheet(title: title, xml: xml)
+        case .comparePlans(let title, let xml):
+            ComparePlansSheet(title: title, leftXML: xml)
         case .scriptPreview(let title, let sql):
             ScriptPreviewSheet(title: title, sql: sql)
-        case .exportResults:
-            EmptyView()
+        case .exportResults(let tabID):
+            if let target = app.tabs.first(where: { $0.id == tabID }) {
+                SaveResultsSheet(tab: target)
+            }
         }
     }
 }

@@ -17,8 +17,27 @@ public struct AgentJob: Sendable, Hashable, Identifiable {
     public var nextRunAt: String
     public var currentStatus: String
     public var scheduleSummary: String
+    /// The step a running job is on, as the Job Activity Monitor shows it.
+    public var currentStepName: String = ""
+    /// When the current execution started, empty when the job is idle.
+    public var startedAt: String = ""
+    /// Seconds the current execution has been running, 0 when idle.
+    public var runningSeconds: Int = 0
+    public var isScheduled: Bool = false
 
     public var isRunning: Bool { currentStatus == "Executing" }
+
+    /// "3 m 12 s" for a job that is running, empty otherwise.
+    public var runningForText: String {
+        guard isRunning, runningSeconds > 0 else { return "" }
+        if runningSeconds >= 3600 {
+            return String(format: "%d h %02d m", runningSeconds / 3600, (runningSeconds % 3600) / 60)
+        }
+        if runningSeconds >= 60 {
+            return String(format: "%d m %02d s", runningSeconds / 60, runningSeconds % 60)
+        }
+        return "\(runningSeconds) s"
+    }
 
     public var outcomeSymbol: String {
         switch lastRunOutcome {
@@ -126,6 +145,19 @@ public struct AgentService: Sendable {
                ISNULL(CASE WHEN ja.start_execution_date IS NOT NULL
                             AND ja.stop_execution_date IS NULL
                            THEN N'Executing' ELSE N'Idle' END, N'Idle') AS current_status,
+               ISNULL(CASE WHEN ja.start_execution_date IS NOT NULL
+                            AND ja.stop_execution_date IS NULL
+                           THEN CONVERT(nvarchar(30), ja.start_execution_date, 120)
+                           ELSE N'' END, N'') AS started_at,
+               ISNULL(CASE WHEN ja.start_execution_date IS NOT NULL
+                            AND ja.stop_execution_date IS NULL
+                           THEN DATEDIFF(second, ja.start_execution_date, GETDATE())
+                           ELSE 0 END, 0) AS running_seconds,
+               ISNULL(CASE WHEN ja.stop_execution_date IS NULL THEN step.step_name
+                           ELSE N'' END, N'') AS current_step,
+               CONVERT(int, CASE WHEN EXISTS (SELECT 1 FROM msdb.dbo.sysjobschedules AS js2
+                                              WHERE js2.job_id = j.job_id)
+                                 THEN 1 ELSE 0 END) AS is_scheduled,
                ISNULL(STUFF((SELECT N', ' + s.name
                              FROM msdb.dbo.sysjobschedules AS js
                              JOIN msdb.dbo.sysschedules AS s ON s.schedule_id = js.schedule_id
@@ -143,11 +175,16 @@ public struct AgentService: Sendable {
         ) AS h
         OUTER APPLY (
             SELECT TOP (1) a.start_execution_date, a.stop_execution_date,
-                   a.next_scheduled_run_date
+                   a.next_scheduled_run_date, a.last_executed_step_id
             FROM msdb.dbo.sysjobactivity AS a
             WHERE a.job_id = j.job_id
             ORDER BY a.session_id DESC
         ) AS ja
+        OUTER APPLY (
+            SELECT TOP (1) s2.step_name
+            FROM msdb.dbo.sysjobsteps AS s2
+            WHERE s2.job_id = j.job_id AND s2.step_id = ja.last_executed_step_id
+        ) AS step
         ORDER BY j.name
         """
         let result = try await session.metadataQuery(sql, database: "msdb")
@@ -165,7 +202,11 @@ public struct AgentService: Sendable {
                 lastRunDuration: AgentService.formatDuration(row.string("last_duration")),
                 nextRunAt: row.string("next_run"),
                 currentStatus: row.string("current_status"),
-                scheduleSummary: row.string("schedules"))
+                scheduleSummary: row.string("schedules"),
+                currentStepName: row.string("current_step"),
+                startedAt: row.string("started_at"),
+                runningSeconds: row.int("running_seconds"),
+                isScheduled: row.int("is_scheduled") == 1)
         }
     }
 

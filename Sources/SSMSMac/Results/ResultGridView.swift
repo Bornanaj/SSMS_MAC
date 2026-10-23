@@ -176,27 +176,62 @@ struct ResultGridView: NSViewRepresentable {
                 .target = self
             menu.addItem(withTitle: "Copy with Headers", action: #selector(copySelectionWithHeaders),
                          keyEquivalent: "").target = self
+
+            // The same exporter the Save Results dialog uses, so what is pasted into a
+            // pull request or a migration script matches what would be written to disk.
+            let asItem = menu.addItem(withTitle: "Copy As", action: nil, keyEquivalent: "")
+            let asMenu = NSMenu()
+            for format in Coordinator.copyFormats {
+                let item = asMenu.addItem(withTitle: format.displayName,
+                                          action: #selector(copyAs(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = format.rawValue
+            }
+            asItem.submenu = asMenu
+
             menu.addItem(.separator())
             menu.addItem(withTitle: "Select All", action: #selector(selectAllRows), keyEquivalent: "")
                 .target = self
             return menu
         }
 
+        /// Everything that makes sense on a clipboard: XLSX is a zip, so it is not here.
+        static let copyFormats: [ExportFormat] = [.markdown, .sqlInsert, .csv, .tsv, .json, .xml]
+
         @objc private func copySelection() { copy(includeHeaders: false) }
         @objc private func copySelectionWithHeaders() { copy(includeHeaders: true) }
+
+        @objc private func copyAs(_ sender: NSMenuItem) {
+            guard let raw = sender.representedObject as? String,
+                  let format = ExportFormat(rawValue: raw) else { return }
+            let slice = selectedSlice()
+            var options = ExportOptions()
+            options.includeHeaders = true
+            options.nullText = settings.gridNullText
+            options.lineEnding = "\n"
+            options.tableName = "Results"
+            guard let text = try? ResultExporter().string(columns: slice.cols, rows: slice.rows,
+                                                          format: format, options: options)
+            else { return }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+            onCopy(text)
+        }
+
+        /// The selection, or the whole result set when nothing is selected — which is
+        /// what every grid in SSMS does on Copy.
+        private func selectedSlice() -> (cols: [TDSColumn], rows: [[TDSValue]]) {
+            let selected = tableView?.selectedRowIndexes ?? IndexSet()
+            let rowIndexes = selected.isEmpty ? Array(0..<model.rows.count) : Array(selected)
+            return model.slice(rows: rowIndexes, columns: Array(0..<model.columns.count))
+        }
 
         @objc private func selectAllRows() {
             tableView?.selectAll(nil)
         }
 
         private func copy(includeHeaders: Bool) {
-            guard let tableView else { return }
-            let rows = tableView.selectedRowIndexes.isEmpty
-                ? Array(0..<model.rows.count)
-                : Array(tableView.selectedRowIndexes)
-            let columnIndexes = Array(0..<model.columns.count)
-            let slice = model.slice(rows: rows, columns: columnIndexes)
-
+            let slice = selectedSlice()
             var lines: [String] = []
             if includeHeaders { lines.append(slice.cols.map(\.name).joined(separator: "\t")) }
             for row in slice.rows {

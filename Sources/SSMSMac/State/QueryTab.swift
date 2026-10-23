@@ -7,6 +7,7 @@ enum ResultsPaneTab: String, CaseIterable, Identifiable {
     case results
     case messages
     case executionPlan
+    case liveStatistics
     case clientStatistics
 
     var id: String { rawValue }
@@ -16,6 +17,7 @@ enum ResultsPaneTab: String, CaseIterable, Identifiable {
         case .results: return "Results"
         case .messages: return "Messages"
         case .executionPlan: return "Execution plan"
+        case .liveStatistics: return "Live statistics"
         case .clientStatistics: return "Client statistics"
         }
     }
@@ -25,6 +27,7 @@ enum ResultsPaneTab: String, CaseIterable, Identifiable {
         case .results: return "tablecells"
         case .messages: return "text.alignleft"
         case .executionPlan: return "point.topleft.down.curvedto.point.bottomright.up"
+        case .liveStatistics: return "waveform.path.ecg"
         case .clientStatistics: return "chart.bar"
         }
     }
@@ -64,6 +67,17 @@ final class QueryTab: ObservableObject, Identifiable {
     @Published var includeActualPlan = false
     @Published var includeEstimatedPlan = false
     @Published var includeClientStatistics = false
+    /// SSMS's Live Query Statistics: poll sys.dm_exec_query_profiles while the query
+    /// runs. It needs profiling on, so it turns the actual plan on with it.
+    @Published var includeLiveStatistics = false
+
+    @Published private(set) var liveSnapshot = LiveQuerySnapshot()
+    /// Why live statistics are not arriving, when they are not: a permission error, an
+    /// engine that predates the DMV, or simply a query that finished too quickly.
+    @Published private(set) var liveStatisticsMessage: String?
+    /// The SPID of this window's own connection, which is what the DMV is keyed by.
+    @Published private(set) var spid = 0
+    private var liveStatsTask: Task<Void, Never>?
 
     @Published private(set) var completionItems: [CompletionItem] = []
     /// True when the last request was for "alias." or "schema.": the editor shows
@@ -83,6 +97,12 @@ final class QueryTab: ObservableObject, Identifiable {
     private var executionTask: Task<Void, Never>?
     private var elapsedTimer: Timer?
     private var resultsByID: [UUID: ResultSetModel] = [:]
+
+    /// Set by AppState so a finished run lands in the history browser. The tab itself
+    /// owns no store: it reports what it ran and who it ran it against.
+    var onExecutionRecorded: ((QueryHistoryEntry) -> Void)?
+    private var executedScript = ""
+    private var executionStartedAt = Date()
 
     var maxRows: Int = 0
     var timeoutSeconds: Int = 0
@@ -152,6 +172,12 @@ final class QueryTab: ObservableObject, Identifiable {
             self.executor = QueryExecutor(connection: connection)
             self.database = connection.database
             statusText = "Connected."
+            // The DMV that backs live statistics is keyed by SPID, and this window has
+            // its own connection, so its SPID is read once here.
+            if let spidResult = try? await connection.query("SELECT @@SPID AS spid;"),
+               let row = spidResult.resultSets.first?.dictionaries().first {
+                self.spid = row.int("spid")
+            }
             self.intelliSense = IntelliSenseProvider(session: session)
             await refreshDatabaseList()
             refreshIntelliSenseCatalog()
@@ -159,6 +185,11 @@ final class QueryTab: ObservableObject, Identifiable {
             statusText = "Connection failed: \(error)"
             appendLocalError("\(error)")
         }
+    }
+
+    /// Lets a dialog report what it did in this window's status line.
+    func statusMessage(_ text: String) {
+        statusText = text
     }
 
     func refreshDatabaseList() async {
@@ -262,6 +293,7 @@ final class QueryTab: ObservableObject, Identifiable {
         executionTask?.cancel()
         completionTask?.cancel()
         catalogTask?.cancel()
+        liveStatsTask?.cancel()
         if let connection { try? await connection.close() }
         connection = nil
         executor = nil
@@ -283,6 +315,8 @@ final class QueryTab: ObservableObject, Identifiable {
         guard !script.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
 
         clearResults()
+        executedScript = script
+        executionStartedAt = Date()
         isExecuting = true
         showResultsPane = true
         selectedPaneTab = .results
@@ -292,10 +326,14 @@ final class QueryTab: ObservableObject, Identifiable {
         var options = QueryExecutionOptions()
         options.maxRows = maxRows
         options.timeoutSeconds = timeoutSeconds
-        options.includeActualExecutionPlan = includeActualPlan
+        // Live statistics read a DMV that only fills while the request is profiled, and
+        // the actual plan is what turns profiling on.
+        options.includeActualExecutionPlan = includeActualPlan || includeLiveStatistics
         options.includeEstimatedExecutionPlan = includeEstimatedPlan
         options.setOptions = setOptions
         options.database = database.isEmpty ? nil : database
+
+        if includeLiveStatistics { startLiveStatistics() }
 
         executionTask = Task { [weak self] in
             guard let self else { return }
@@ -368,6 +406,8 @@ final class QueryTab: ObservableObject, Identifiable {
     private func finishExecution() {
         isExecuting = false
         stopTimer()
+        stopLiveStatistics()
+        recordHistory()
         if let summary {
             elapsed = summary.elapsed
             if summary.cancelled {
@@ -383,7 +423,85 @@ final class QueryTab: ObservableObject, Identifiable {
         }
     }
 
+    // MARK: - Live query statistics
+
+    /// Polls the profiles DMV on the session's metadata connection — a second
+    /// connection, because the one running the query is busy running it.
+    private func startLiveStatistics() {
+        guard let session, spid > 0 else {
+            liveStatisticsMessage = "This window has no connection of its own to watch."
+            return
+        }
+        let service = LiveQueryStatsService(session: session)
+        let target = spid
+        liveStatsTask?.cancel()
+        liveStatsTask = Task { [weak self] in
+            let info = await session.serverInfo
+            guard LiveQueryStatsService.isSupported(info) else {
+                await MainActor.run {
+                    self?.liveStatisticsMessage = service.requirementText(info)
+                }
+                return
+            }
+            while !Task.isCancelled {
+                do {
+                    let snapshot = try await service.snapshot(sessionID: target)
+                    guard !Task.isCancelled else { return }
+                    await MainActor.run {
+                        guard let self else { return }
+                        // An empty poll mid-run means the request has not started
+                        // producing rows yet; it is not a reason to drop what is shown.
+                        if !snapshot.isEmpty {
+                            self.liveSnapshot = snapshot
+                            self.liveStatisticsMessage = nil
+                        }
+                    }
+                } catch {
+                    await MainActor.run {
+                        self?.liveStatisticsMessage = String(describing: error)
+                    }
+                    return
+                }
+                try? await Task.sleep(nanoseconds: 400_000_000)
+            }
+        }
+    }
+
+    private func stopLiveStatistics() {
+        liveStatsTask?.cancel()
+        liveStatsTask = nil
+        if includeLiveStatistics, liveSnapshot.isEmpty, liveStatisticsMessage == nil {
+            liveStatisticsMessage = "The query finished before any operator reported "
+                + "progress. Live statistics only show something for a query that runs "
+                + "long enough to be sampled."
+        }
+    }
+
+    /// One entry per execution, with what it returned and how long it took. A run that
+    /// never reached the server (no connection, empty script) is not recorded.
+    private func recordHistory() {
+        guard let onExecutionRecorded, !executedScript.isEmpty else { return }
+        let firstError = messages.first { $0.kind == .error }
+        let entry = QueryHistoryEntry(
+            sql: executedScript,
+            server: sessionName,
+            database: database,
+            startedAt: executionStartedAt,
+            elapsed: summary?.elapsed ?? Date().timeIntervalSince(executionStartedAt),
+            rowsReturned: summary?.totalRows ?? resultSets.reduce(0) { $0 + $1.rowCount },
+            succeeded: summary?.succeeded ?? (firstError == nil),
+            errorText: firstError?.text,
+            rowsAffected: summary?.rowsAffected,
+            cancelled: summary?.cancelled,
+            batchCount: summary?.batchCount,
+            tabTitle: title)
+        executedScript = ""
+        onExecutionRecorded(entry)
+    }
+
     private func clearResults() {
+        liveSnapshot = LiveQuerySnapshot()
+        liveStatisticsMessage = nil
         resultSets.removeAll()
         resultsByID.removeAll()
         messages.removeAll()
