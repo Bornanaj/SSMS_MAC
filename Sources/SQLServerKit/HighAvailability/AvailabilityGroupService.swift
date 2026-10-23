@@ -74,31 +74,47 @@ public struct AvailabilityGroupService: Sendable {
         }
     }
 
-    /// 2016 brought DTC_SUPPORT, DB_FAILOVER, basic groups and the required-synchronized
-    /// -secondaries count; 2017 brought CLUSTER_TYPE, SEEDING_MODE and the lag column.
-    private func capabilities(_ info: ServerInfo) -> (modern: Bool, seeding: Bool, lag: Bool) {
-        (info.majorVersion >= 13, info.majorVersion >= 14, info.majorVersion >= 14)
+    /// Which columns this engine actually has. Asking for one it does not is an
+    /// "Invalid column name" error that takes the whole query with it, so each group of
+    /// columns is gated by the version that introduced it:
+    ///
+    /// - 2016 (13.x): `db_failover`, `dtc_support`, `basic_features`,
+    ///   `required_synchronized_secondaries_to_commit`, `is_distributed`, `seeding_mode_desc`
+    /// - 2017 (14.x): `cluster_type_desc`, and `secondary_lag_seconds` as a column that
+    ///   is there on every build (2016 only got it in SP2)
+    public static func capabilities(_ info: ServerInfo)
+        -> (modern: Bool, seeding: Bool, clusterType: Bool, lag: Bool) {
+        let major = info.majorVersion
+        return (major >= 13, major >= 13, major >= 14, major >= 14)
     }
 
     // MARK: - Reads
 
-    public func groups() async throws -> [AvailabilityGroup] {
-        try await requireAlwaysOn()
-        let info = await session.serverInfo
-        let caps = capabilities(info)
+    /// The availability group query, built for one engine version.
+    ///
+    /// Columns are gated rather than assumed: asking an engine for a column it does
+    /// not have is an "Invalid column name" error that takes the whole query with it,
+    /// and an availability group is exactly the kind of thing that is still running on
+    /// an older build.
+    public static func groupsQuery(_ info: ServerInfo) -> String {
+        let caps = AvailabilityGroupService.capabilities(info)
         let modernColumns = caps.modern
             ? """
               CONVERT(int, ag.db_failover) AS db_failover,
                      CONVERT(int, ag.dtc_support) AS dtc_support,
                      CONVERT(int, ag.basic_features) AS basic_features,
                      ag.required_synchronized_secondaries_to_commit AS required_secondaries,
-                     ISNULL(ag.cluster_type_desc, N'WSFC') AS cluster_type,
                      CONVERT(int, ag.is_distributed) AS is_distributed,
               """
             : """
               0 AS db_failover, 0 AS dtc_support, 0 AS basic_features,
-                     0 AS required_secondaries, N'WSFC' AS cluster_type, 0 AS is_distributed,
+                     0 AS required_secondaries, 0 AS is_distributed,
               """
+        // CLUSTER_TYPE arrived with the Linux-era 2017 engine; before that every group
+        // is on a Windows cluster by definition.
+        let clusterTypeColumn = caps.clusterType
+            ? "ISNULL(ag.cluster_type_desc, N'WSFC') AS cluster_type,"
+            : "N'WSFC' AS cluster_type,"
 
         let sql = """
         SELECT ag.name AS group_name,
@@ -110,6 +126,7 @@ public struct AvailabilityGroupService: Sendable {
                ISNULL(ags.synchronization_health_desc, N'') AS sync_health,
                ISNULL(ags.primary_recovery_health_desc, N'') AS recovery_health,
                \(modernColumns)
+               \(clusterTypeColumn)
                (SELECT COUNT(*) FROM sys.availability_replicas AS r
                 WHERE r.group_id = ag.group_id) AS replica_count,
                (SELECT COUNT(DISTINCT drs.group_database_id)
@@ -129,6 +146,12 @@ public struct AvailabilityGroupService: Sendable {
         LEFT JOIN sys.dm_hadr_availability_group_states AS ags ON ags.group_id = ag.group_id
         ORDER BY ag.name
         """
+        return sql
+    }
+
+    public func groups() async throws -> [AvailabilityGroup] {
+        try await requireAlwaysOn()
+        let sql = AvailabilityGroupService.groupsQuery(await session.serverInfo)
         return try await rows(sql).map { row in
             AvailabilityGroup(
                 name: row.string("group_name"),
@@ -153,13 +176,13 @@ public struct AvailabilityGroupService: Sendable {
         }
     }
 
-    public func replicas(group: String) async throws -> [AvailabilityReplica] {
-        try await requireAlwaysOn()
-        let info = await session.serverInfo
-        let seeding = capabilities(info).seeding
+    /// SEEDING_MODE is 2016 and later; before that a secondary is always seeded by
+    /// hand, so the column is answered with a constant rather than asked for.
+    public static func replicasQuery(group: String, info: ServerInfo) -> String {
+        let seeding = AvailabilityGroupService.capabilities(info).seeding
             ? "ISNULL(ar.seeding_mode_desc, N'MANUAL')"
             : "N'MANUAL'"
-        let sql = """
+        return """
         SELECT CONVERT(nvarchar(36), ar.replica_id) AS replica_id,
                ag.name AS group_name,
                ar.replica_server_name,
@@ -187,6 +210,12 @@ public struct AvailabilityGroupService: Sendable {
         ORDER BY CASE WHEN ISNULL(ars.role_desc, N'') = N'PRIMARY' THEN 0 ELSE 1 END,
                  ar.replica_server_name
         """
+    }
+
+    public func replicas(group: String) async throws -> [AvailabilityReplica] {
+        try await requireAlwaysOn()
+        let sql = AvailabilityGroupService.replicasQuery(group: group,
+                                                         info: await session.serverInfo)
         return try await rows(sql).map { row in
             AvailabilityReplica(
                 replicaID: row.string("replica_id"),
@@ -216,15 +245,15 @@ public struct AvailabilityGroupService: Sendable {
         }
     }
 
-    public func databases(group: String) async throws -> [AvailabilityDatabaseState] {
-        try await requireAlwaysOn()
-        let info = await session.serverInfo
-        // The cluster view is the driver rather than the state DMV, so a database that
-        // has been added to the group but not yet joined on a secondary still shows up.
-        let lag = capabilities(info).lag
+    /// The cluster view is the driver rather than the state DMV, so a database that has
+    /// been added to the group but not yet joined on a secondary still shows up — and
+    /// `is_failover_ready` and `is_database_joined` live on that view, not on the state
+    /// one, which is the kind of detail that costs a whole pane when it is wrong.
+    public static func databasesQuery(group: String, info: ServerInfo) -> String {
+        let lag = AvailabilityGroupService.capabilities(info).lag
             ? "CONVERT(int, ISNULL(drs.secondary_lag_seconds, -1))"
             : "-1"
-        let sql = """
+        return """
         SELECT ag.name AS group_name,
                dcs.database_name,
                ar.replica_server_name,
@@ -236,7 +265,8 @@ public struct AvailabilityGroupService: Sendable {
                ISNULL(drs.database_state_desc, N'') AS database_state,
                CONVERT(int, ISNULL(drs.is_suspended, 0)) AS is_suspended,
                ISNULL(drs.suspend_reason_desc, N'') AS suspend_reason,
-               CONVERT(int, ISNULL(drs.is_failover_ready, 0)) AS is_failover_ready,
+               -- is_failover_ready belongs to the cluster view, not the state DMV.
+               CONVERT(int, ISNULL(dcs.is_failover_ready, 0)) AS is_failover_ready,
                CONVERT(bigint, ISNULL(drs.log_send_queue_size, 0)) AS log_send_queue,
                CONVERT(bigint, ISNULL(drs.log_send_rate, 0)) AS log_send_rate,
                CONVERT(bigint, ISNULL(drs.redo_queue_size, 0)) AS redo_queue,
@@ -255,6 +285,12 @@ public struct AvailabilityGroupService: Sendable {
                  CASE WHEN ISNULL(drs.is_primary_replica, 0) = 1 THEN 0 ELSE 1 END,
                  ar.replica_server_name
         """
+    }
+
+    public func databases(group: String) async throws -> [AvailabilityDatabaseState] {
+        try await requireAlwaysOn()
+        let sql = AvailabilityGroupService.databasesQuery(group: group,
+                                                          info: await session.serverInfo)
         return try await rows(sql).map { row in
             AvailabilityDatabaseState(
                 groupName: row.string("group_name"),

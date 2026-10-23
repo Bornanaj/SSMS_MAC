@@ -538,7 +538,9 @@ struct AlwaysOnSheet: View {
         do {
             let plan = try AvailabilityGroupPlans.addReplica(
                 group: group, replica: replica,
-                supportsSeeding: server.serverInfo.majorVersion >= 14)
+                // SEEDING_MODE is 2016 syntax; CLUSTER_TYPE, which the create script
+                // carries, is 2017.
+                supportsSeeding: server.serverInfo.majorVersion >= 13)
             pendingPlan = ScriptPlanLaunch(plan: plan, server: server)
         } catch {
             isError = true
@@ -689,22 +691,47 @@ struct AlwaysOnSheet: View {
         isBusy = true
         defer { isBusy = false }
         let service = AvailabilityGroupService(session: server.session)
+
+        // Each pane is loaded on its own. One query that an engine version or a
+        // permission refuses must not take the rest of the dashboard down with it —
+        // which is exactly what a single chained `try` did.
+        var failures: [String] = []
+
         do {
             replicas = try await service.replicas(group: group.name)
+        } catch {
+            replicas = []
+            failures.append("replicas: \(error)")
+        }
+        do {
             databases = try await service.databases(group: group.name)
+        } catch {
+            databases = []
+            failures.append("databases: \(error)")
+        }
+        do {
             listeners = try await service.listeners(group: group.name)
-            cluster = (try? await service.cluster()) ?? AlwaysOnClusterInfo()
-            issues = AlwaysOnHealth.evaluate(group: group, replicas: replicas,
-                                             databases: databases, listeners: listeners)
+        } catch {
+            listeners = []
+            failures.append("listeners: \(error)")
+        }
+        // A group with CLUSTER_TYPE NONE or EXTERNAL has no WSFC to read, which is not
+        // a failure worth reporting.
+        cluster = (try? await service.cluster()) ?? AlwaysOnClusterInfo()
+
+        issues = AlwaysOnHealth.evaluate(group: group, replicas: replicas,
+                                         databases: databases, listeners: listeners)
+
+        if failures.isEmpty {
             isError = false
             if let worst = AlwaysOnHealth.worstSeverity(issues) {
                 status = "\(issues.count) finding(s), worst: \(worst.title.lowercased())."
             } else {
                 status = "\(group.name) is healthy."
             }
-        } catch {
+        } else {
             isError = true
-            status = String(describing: error)
+            status = failures.joined(separator: " · ")
         }
     }
 }

@@ -336,6 +336,74 @@ func runAlwaysOnTests(_ t: TestRunner) {
                  "an unreachable commit requirement is reported")
     }
 
+    // MARK: - Catalog queries
+
+    t.suite("always on queries ask for columns the engine has") {
+        func info(_ version: String) -> ServerInfo {
+            var value = ServerInfo()
+            value.productVersion = version
+            return value
+        }
+        let sql2014 = info("12.0.6024.0")
+        let sql2016 = info("13.0.5026.0")
+        let sql2017 = info("14.0.3048.4")
+
+        // is_failover_ready and is_database_joined live on the cluster view; reading
+        // them off the state DMV is "Invalid column name", which empties the pane.
+        let databases = AvailabilityGroupService.databasesQuery(group: "AG", info: sql2017)
+        t.expect(databases.contains("dcs.is_failover_ready"),
+                 "failover readiness is read from the cluster view")
+        t.expect(!databases.contains("drs.is_failover_ready"),
+                 "and never from the state DMV", databases)
+        t.expect(databases.contains("dcs.is_database_joined"),
+                 "so is the joined flag")
+        t.expect(databases.contains("drs.secondary_lag_seconds"),
+                 "2017 reports the lag column")
+        t.expect(!AvailabilityGroupService.databasesQuery(group: "AG", info: sql2016)
+                    .contains("secondary_lag_seconds"),
+                 "2016 does not, so it is not asked for")
+
+        // The group columns arrived in two waves, and asking an older engine for the
+        // later ones fails the whole query rather than one column.
+        let groups2014 = AvailabilityGroupService.groupsQuery(sql2014)
+        for column in ["ag.db_failover", "ag.dtc_support", "ag.basic_features",
+                       "ag.required_synchronized_secondaries_to_commit", "ag.is_distributed",
+                       "ag.cluster_type_desc"] {
+            t.expect(!groups2014.contains(column), "2014 is not asked for \(column)")
+        }
+        let groups2016 = AvailabilityGroupService.groupsQuery(sql2016)
+        t.expect(groups2016.contains("ag.db_failover"), "2016 has database level failover")
+        t.expect(groups2016.contains("ag.is_distributed"), "and distributed groups")
+        t.expect(!groups2016.contains("ag.cluster_type_desc"),
+                 "but CLUSTER_TYPE is 2017 syntax", groups2016)
+        t.expect(AvailabilityGroupService.groupsQuery(sql2017).contains("ag.cluster_type_desc"),
+                 "2017 reports the cluster type")
+
+        // Every version still has to produce the same column names, or the decoder
+        // reads zeros out of a result set that never had the column.
+        for query in [groups2014, groups2016, AvailabilityGroupService.groupsQuery(sql2017)] {
+            for alias in ["AS db_failover", "AS dtc_support", "AS basic_features",
+                          "AS required_secondaries", "AS is_distributed", "AS cluster_type"] {
+                t.expect(query.contains(alias), "every build still returns \(alias)")
+            }
+        }
+
+        t.expect(AvailabilityGroupService.replicasQuery(group: "AG", info: sql2016)
+                    .contains("ar.seeding_mode_desc"),
+                 "seeding mode is 2016 and later")
+        t.expect(!AvailabilityGroupService.replicasQuery(group: "AG", info: sql2014)
+                    .contains("seeding_mode_desc"),
+                 "2014 is not asked for it")
+        t.expect(AvailabilityGroupService.replicasQuery(group: "AG", info: sql2014)
+                    .contains("AS seeding_mode"),
+                 "but the column still comes back")
+
+        // The group name is a literal, not an interpolation that could carry a quote.
+        t.expect(AvailabilityGroupService.replicasQuery(group: "it's", info: sql2017)
+                    .contains("N'it''s'"),
+                 "the group name goes through the literal quoter")
+    }
+
     // MARK: - Multi-instance plans
 
     t.suite("always on failover plan") {
