@@ -223,6 +223,34 @@ enum SelfTest {
             check("synonym scripting is routed, not refused", false, String(describing: error))
         }
 
+        // 12b. Always On. Most test instances are stand-alone, so "not enabled" is a
+        // pass: what has to work is reading the state without an error.
+        let hadr = AvailabilityGroupService(session: server.session)
+        let hadrState = await hadr.availability()
+        if hadrState.supported && hadrState.enabled {
+            do {
+                let groups = try await hadr.groups()
+                check("always on groups read", true,
+                      groups.map { "\($0.name) (\($0.synchronizationHealth))" }
+                        .joined(separator: ", "))
+                if let first = groups.first {
+                    let replicas = try await hadr.replicas(group: first.name)
+                    let databases = try await hadr.databases(group: first.name)
+                    let listeners = try await hadr.listeners(group: first.name)
+                    let issues = AlwaysOnHealth.evaluate(group: first, replicas: replicas,
+                                                         databases: databases,
+                                                         listeners: listeners)
+                    check("always on detail read", !replicas.isEmpty,
+                          "\(replicas.count) replicas, \(databases.count) database states, "
+                            + "\(listeners.count) listeners, \(issues.count) findings")
+                }
+            } catch {
+                check("always on groups read", false, String(describing: error))
+            }
+        } else {
+            print("[SKIP] always on — \(hadrState.reason)")
+        }
+
         // 13. Tear down
         let tabCountBefore = app.tabs.count
         app.closeTab(tab)

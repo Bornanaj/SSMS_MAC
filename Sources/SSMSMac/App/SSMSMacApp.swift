@@ -209,6 +209,11 @@ struct AppCommands: Commands {
             }
             .disabled(currentServer == nil)
 
+            Button("Always On Dashboard…") {
+                if let server = currentServer { app.activeSheet = .alwaysOn(server.id, nil) }
+            }
+            .disabled(currentServer == nil)
+
             Button("Query Store…") {
                 if let server = currentServer {
                     app.activeSheet = .queryStore(server.id, app.selectedTab?.database)

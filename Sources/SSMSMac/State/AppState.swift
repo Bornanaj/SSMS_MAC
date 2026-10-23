@@ -74,6 +74,7 @@ final class AppState: ObservableObject {
         case databaseSecurity(UUID, String)
         case permissions(UUID, String, String?, String?)
         case agentJobs(UUID)
+        case alwaysOn(UUID, String?)
         case reports(UUID, String?)
         case serverProperties(UUID)
         case registeredServers
@@ -109,6 +110,7 @@ final class AppState: ObservableObject {
             case .permissions(let s, let d, let sc, let o):
                 return "perms-\(s)-\(d)-\(sc ?? "")-\(o ?? "")"
             case .agentJobs(let s): return "agent-\(s)"
+            case .alwaysOn(let s, let group): return "alwayson-\(s)-\(group ?? "")"
             case .reports(let s, let d): return "reports-\(s)-\(d ?? "")"
             case .serverProperties(let s): return "serverprops-\(s)"
             case .registeredServers: return "registeredservers"

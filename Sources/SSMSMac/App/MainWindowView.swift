@@ -228,6 +228,10 @@ struct MainWindowView: View {
             if let server = app.server(id: serverID) {
                 AgentJobsSheet(server: server)
             }
+        case .alwaysOn(let serverID, let group):
+            if let server = app.server(id: serverID) {
+                AlwaysOnSheet(server: server, initialGroup: group)
+            }
         case .reports(let serverID, let database):
             if let server = app.server(id: serverID) {
                 ReportsSheet(server: server, initialDatabase: database)

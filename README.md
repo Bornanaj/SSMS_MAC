@@ -157,6 +157,20 @@ swift build -c release          # libraries and executables
 - Actual and estimated execution plans with per‑operator cost and missing‑index hints
 - Export to CSV, TSV, JSON, XML, Markdown, HTML, SQL INSERT and XLSX
 
+**Always On high availability**
+- `Always On High Availability` in the Object Explorer: availability groups, their
+  replicas, databases and listeners, each with its live state on the node
+- Dashboard with the group's replicas, per-database synchronization, send and redo
+  queues, estimated data loss, listeners and the WSFC quorum
+- Health panel: the policy findings SSMS's dashboard raises — suspended data movement,
+  a disconnected replica, an unsynchronized synchronous secondary, an automatic failover
+  target that is not ready, a commit requirement no replica can satisfy
+- Planned and forced failover, suspend and resume data movement, add and remove
+  databases, add, modify and remove replicas and listeners, read-only routing, the
+  seeding grant, group properties, and Script Availability Group as CREATE
+- Every action is shown as T-SQL first and names the instance it has to run on; nothing
+  fails a group over on a mis-click
+
 **Design and scripting**
 - Table Designer: add, drop and alter columns, defaults, identity and primary keys, with
   the ALTER batch shown before it runs
@@ -299,8 +313,12 @@ docker run -d --platform linux/amd64 --name ssms-mac-test \
 - MARS is not negotiated. Each query window owns its own connection, which is how SSMS
   behaves anyway.
 - The execution plan is a cost‑annotated operator tree, not the SSMS graphical canvas.
-- Always On, Replication, Service Broker and SQL Agent job editing are not implemented;
-  SQL Agent jobs are listed but not editable.
+- Replication, Service Broker and SQL Agent job editing are not implemented; SQL Agent
+  jobs are listed but not editable.
+- Always On has no creation wizard: an existing group is read and managed in full, but a
+  new group, replica or listener is produced as a script to run rather than built by a
+  wizard. Failover runs on the replica taking over, so a failover started from a session
+  connected elsewhere is scripted for that instance instead of being run here.
 - The error log viewer needs membership of `securityadmin`, because that is what
   `sp_readerrorlog` requires. It reports the permission error rather than an empty log.
 - Query Store needs SQL Server 2016 or later, and the reports stay empty until the first

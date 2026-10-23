@@ -144,7 +144,8 @@ public enum QueryEvent
   sequence, userDefinedDataType, userDefinedTableType, schema, databaseUser,
   databaseRole, applicationRole, login, serverRole, credential, linkedServer,
   filegroup, databaseFile, parameter, statistic, assembly, xmlSchemaCollection,
-  partitionFunction, partitionScheme, agentJob, externalTable, securityPolicy, unknown
+  partitionFunction, partitionScheme, agentJob, availabilityGroup, availabilityReplica,
+  availabilityDatabase, availabilityListener, externalTable, securityPolicy, unknown
 - `enum ObjectFolderKind` – databases, systemDatabases, tables, systemTables, views,
   systemViews, columns, keys, constraints, indexes, triggers, statistics,
   programmability, storedProcedures, systemStoredProcedures, functions,
@@ -153,7 +154,9 @@ public enum QueryEvent
   databaseUsers, databaseRoles, applicationRoles, schemas, serverObjects, logins,
   serverRoles, credentials, linkedServers, management, agent, agentJobs, storage,
   filegroups, databaseFiles, parameters, assemblies, xmlSchemaCollections,
-  partitionSchemes, partitionFunctions, securityPolicies, and more (see the file)
+  partitionSchemes, partitionFunctions, securityPolicies, alwaysOn, availabilityGroups,
+  availabilityReplicas, availabilityDatabases, availabilityListeners,
+  and more (see the file)
 - `struct ObjectExplorerNode: Identifiable, Hashable, Sendable` with
   `id, parentID, kind, folder, label, detail, iconName, isExpandable, database,
    schema, name, objectID, isSystemObject, info: [String: String]`
