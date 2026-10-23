@@ -336,6 +336,44 @@ public struct BackupServerSettings: Sendable {
     }
 }
 
+// MARK: - Cloud credentials
+
+/// The credential SQL Server needs to back up to a URL: a SAS token named after an Azure
+/// container, or an access key named after an S3 bucket (SQL Server 2022 and later).
+public enum CloudCredential {
+    public static func azureScript(containerURL: String, sasToken: String) -> String {
+        let url = containerURL.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+        var token = sasToken.trimmingCharacters(in: .whitespaces)
+        if token.hasPrefix("?") { token.removeFirst() }
+        return dropScript(url) + "CREATE CREDENTIAL \(SQLIdentifier.quote(url)) WITH IDENTITY = N'SHARED ACCESS SIGNATURE', "
+            + "SECRET = \(SQLIdentifier.literal(token));"
+    }
+
+    public static func s3Script(bucketURL: String, accessKey: String, secretKey: String) -> String {
+        let url = bucketURL.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+        return dropScript(url) + "CREATE CREDENTIAL \(SQLIdentifier.quote(url)) WITH IDENTITY = N'S3 Access Key', "
+            + "SECRET = \(SQLIdentifier.literal("\(accessKey):\(secretKey)"));"
+    }
+
+    static func dropScript(_ name: String) -> String {
+        "IF EXISTS (SELECT 1 FROM sys.credentials WHERE name = \(SQLIdentifier.literal(name))) "
+            + "DROP CREDENTIAL \(SQLIdentifier.quote(name));\n"
+    }
+
+    /// Credentials whose names are URLs, which backup to URL looks up by prefix.
+    public static func list(session: SQLServerSession) async throws -> [String] {
+        let sql = "SELECT name FROM sys.credentials WHERE name LIKE N'http%' OR name LIKE N's3://%' ORDER BY name"
+        let result = try await session.metadataQuery(sql, database: "master")
+        return (result.resultSets.first?.dictionaries() ?? []).map { $0.string("name") }
+    }
+
+    public static func create(_ script: String, session: SQLServerSession) async throws {
+        let connection = try await session.openConnection(database: "master")
+        defer { Task { try? await connection.close() } }
+        _ = try await StreamingStatement.run(script, on: connection)
+    }
+}
+
 // MARK: - Compression analyzer
 
 /// One trial of the Compression Analyzer.

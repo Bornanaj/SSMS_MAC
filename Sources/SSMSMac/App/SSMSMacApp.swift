@@ -42,6 +42,13 @@ struct SSMSMacApp: App {
                 .environmentObject(settings)
                 .preferredColorScheme(settings.colorScheme)
         }
+
+        WindowGroup("SQL Backup", id: "sql-backup", for: CompareLaunch.self) { $launch in
+            BackupWindow(launch: launch ?? CompareLaunch())
+                .environmentObject(app)
+                .environmentObject(settings)
+                .preferredColorScheme(settings.colorScheme)
+        }
     }
 }
 
@@ -282,6 +289,14 @@ struct AppCommands: Commands {
             .keyboardShortcut("k", modifiers: [.command, .option, .shift])
 
             Button("Open Comparison Project…") { openComparisonProject() }
+
+            Divider()
+
+            Button("SQL Backup…") {
+                openWindow(id: "sql-backup",
+                           value: CompareLaunch(serverID: currentServer?.id, database: app.selectedTab?.database))
+            }
+            .keyboardShortcut("b", modifiers: [.command, .option])
         }
 
         CommandMenu("Edit Extras") {

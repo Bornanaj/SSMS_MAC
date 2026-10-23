@@ -92,8 +92,9 @@ public struct BackupReport: Sendable {
 
     public func json() -> Data {
         let items: [[String: Any]] = rows.map { item in
-            [
-                "date": item.date.map(ServerTime.display) ?? "", "operation": item.kindTitle,
+            let date: String = item.date.map(ServerTime.display) ?? ""
+            return [
+                "date": date, "operation": item.kindTitle,
                 "database": item.database, "job": item.jobName, "type": item.typeTitle,
                 "succeeded": item.succeeded, "durationSeconds": item.duration ?? 0,
                 "backupSize": item.backupSize, "compressedSize": item.compressedSize,

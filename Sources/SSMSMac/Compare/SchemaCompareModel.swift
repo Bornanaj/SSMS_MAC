@@ -58,9 +58,14 @@ final class SchemaCompareModel: ObservableObject {
             source.profile = server.profile
             source.database = launch.database ?? server.serverInfo.currentDatabase
             target.profile = server.profile
+            if let targetDatabase = launch.targetDatabase {
+                target.database = targetDatabase
+                showSetup = false
+            }
             Task {
                 await source.loadDatabases(app: app, pool: pool)
                 await target.loadDatabases(app: app, pool: pool)
+                if launch.targetDatabase != nil { await compare(app: app) }
             }
         }
     }
