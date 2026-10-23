@@ -150,9 +150,13 @@ final class AppState: ObservableObject {
                                                              password: password,
                                                              accessToken: accessToken)
             let info = await session.serverInfo
-            let server = ConnectedServer(session: session, profile: profile, serverInfo: info)
+            // The engine's own name is what the saved connection is listed under from
+            // now on; the address stays in the profile as the second line.
+            var saved = profile
+            if !info.serverName.isEmpty { saved.discoveredServerName = info.serverName }
+            let server = ConnectedServer(session: session, profile: saved, serverInfo: info)
             servers.append(server)
-            if persist { connections.save(profile, password: password) }
+            if persist { connections.save(saved, password: password) }
             await explorer.addServer(session: session)
             statusMessage = "Connected to \(info.serverName)."
 

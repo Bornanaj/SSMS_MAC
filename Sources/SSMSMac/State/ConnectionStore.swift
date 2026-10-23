@@ -52,6 +52,17 @@ final class ConnectionStore: ObservableObject {
         persist()
     }
 
+    /// Files a saved connection under the name the engine reports, so the list shows
+    /// "OMS-01" rather than the address that was typed to reach it.
+    func recordServerName(_ serverName: String, for profileID: UUID) {
+        let trimmed = serverName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let index = profiles.firstIndex(where: { $0.id == profileID }),
+              profiles[index].discoveredServerName != trimmed else { return }
+        profiles[index].discoveredServerName = trimmed
+        persist()
+    }
+
     func remove(_ profile: ConnectionProfile) {
         Keychain.removePassword(for: profile.credentialKey)
         profiles.removeAll { $0.id == profile.id }

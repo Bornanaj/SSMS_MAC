@@ -60,10 +60,12 @@ struct ConnectSheet: View {
                 ForEach(app.connections.profiles) { saved in
                     VStack(alignment: .leading, spacing: 1) {
                         Text(saved.displayName).lineLimit(1)
-                        Text(saved.authentication.displayName)
+                        Text(saved.addressDescription)
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                            .lineLimit(1)
                     }
+                    .help(saved.authentication.displayName)
                     .tag(saved.id)
                     .contextMenu {
                         Button("Delete", role: .destructive) { app.connections.remove(saved) }
@@ -238,6 +240,8 @@ struct ConnectSheet: View {
            existing.server != profile.server || existing.username != profile.username {
             target.id = UUID()
             if target.name == existing.name { target.name = "" }
+            // The name the old server reported says nothing about this one.
+            target.discoveredServerName = nil
         }
         Task {
             await app.connect(profile: target,

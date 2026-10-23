@@ -194,6 +194,45 @@ func runSQLServerKitTests(_ t: TestRunner, extra: (TestRunner) -> Void = { _ in 
                 "2008R2", "10.50 is 2008 R2")
     }
 
+    t.suite("connection profiles") {
+        var profile = ConnectionProfile(server: "172.31.112.70", username: "sa")
+        t.equal(profile.displayName, "172.31.112.70 (sa)", "falls back to the address typed")
+
+        profile.discoveredServerName = "OMS-01"
+        t.equal(profile.displayName, "OMS-01", "the engine's own name wins over the address")
+        t.equal(profile.addressDescription, "172.31.112.70 · sa",
+                "the address stays on the second line")
+
+        profile.name = "Production OMS"
+        t.equal(profile.displayName, "Production OMS", "a name the user gave wins over both")
+
+        let instance = ConnectionProfile(server: "sqlbox\\SQLEXPRESS,1444",
+                                         discoveredServerName: "SQLBOX\\SQLEXPRESS",
+                                         authentication: .windows,
+                                         username: "dba", domain: "CONTOSO")
+        t.equal(instance.addressDescription, "sqlbox\\SQLEXPRESS,1444 · CONTOSO\\dba",
+                "instance, non-default port and domain account")
+
+        // Saved connections written before the server name was recorded have to keep
+        // decoding, or the whole list is lost on upgrade.
+        let legacy = Data("""
+        [{"id":"8E4F6A1E-0C6B-4D66-9B35-9F3B7C1E2A55","name":"","server":"localhost",
+          "authentication":"sqlLogin","username":"sa","domain":"","database":"",
+          "savePassword":true,"encryption":"required","trustServerCertificate":true,
+          "connectTimeoutSeconds":15,"executionTimeoutSeconds":0,
+          "applicationName":"SSMS for Mac","applicationIntentReadOnly":false,
+          "multiSubnetFailover":false,"packetSize":4096,
+          "createdAt":"2025-01-02T03:04:05Z"}]
+        """.utf8)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let decoded = try? decoder.decode([ConnectionProfile].self, from: legacy)
+        t.expect(decoded?.count == 1, "a profile saved by an older build still decodes",
+                 decoded.map { "\($0.count) profiles" } ?? "decode failed")
+        t.expect(decoded?.first?.discoveredServerName == nil,
+                 "the new field is absent rather than defaulted to a wrong name")
+    }
+
     t.suite("data editor scripting") {
         // The editor is exercised end to end by the CLI; here we pin the value coercion
         // rules that the grid depends on.

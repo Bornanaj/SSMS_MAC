@@ -66,6 +66,13 @@ final class QueryTab: ObservableObject, Identifiable {
     @Published var includeClientStatistics = false
 
     @Published private(set) var completionItems: [CompletionItem] = []
+    /// True when the last request was for "alias." or "schema.": the editor shows
+    /// nothing rather than a keyword list there.
+    @Published private(set) var completionIsMemberContext = false
+    @Published private(set) var isLoadingCatalog = false
+    /// Raised on the main actor once a completion request has landed, so the popup can
+    /// open with the real list instead of whatever was cached a keystroke ago.
+    var onCompletionsUpdated: (() -> Void)?
     private var intelliSense: IntelliSenseProvider?
     private var completionTask: Task<Void, Never>?
     private var catalogTask: Task<Void, Never>?
@@ -132,7 +139,9 @@ final class QueryTab: ObservableObject, Identifiable {
         let info = await session.serverInfo
         self.session = session
         self.sessionID = session.id
-        self.sessionName = session.profile.displayName
+        self.sessionName = info.serverName.isEmpty
+            ? session.profile.displayName
+            : info.serverName
         self.serverLabel = info.serverName
         self.accentColorHex = session.profile.colorHex
         let target = database ?? info.currentDatabase
@@ -185,20 +194,44 @@ final class QueryTab: ObservableObject, Identifiable {
         guard let intelliSense, !database.isEmpty else { return }
         let target = database
         catalogTask?.cancel()
-        catalogTask = Task { _ = try? await intelliSense.refresh(database: target) }
+        isLoadingCatalog = true
+        catalogTask = Task { [weak self] in
+            _ = try? await intelliSense.refresh(database: target)
+            self?.isLoadingCatalog = false
+        }
     }
 
-    /// Recompute the completion list for the caret position. The popup itself reads
-    /// `completionItems` synchronously, so this has to run ahead of it.
-    func requestCompletions(at offset: Int) {
+    /// Start a catalog load only when none is running: typing must not cancel the
+    /// fetch it is waiting for, which would leave completion stuck on keywords.
+    private func ensureCatalogLoaded() {
+        guard !isLoadingCatalog else { return }
+        refreshIntelliSenseCatalog()
+    }
+
+    /// Recompute the completion list for the caret position. The popup reads
+    /// `completionItems` synchronously, so when the answer lands after the popup has
+    /// already opened, `onCompletionsUpdated` tells the editor to re-rank.
+    ///
+    /// `script` comes from the text view rather than from `text`, which is only
+    /// updated once AppKit has finished the edit and so lags the caret by a character.
+    func requestCompletions(script: String? = nil, at offset: Int) {
         guard let intelliSense else { return }
-        let script = text
+        let source = script ?? text
         let target = database
         completionTask?.cancel()
         completionTask = Task { [weak self] in
-            let items = await intelliSense.completions(script: script, offset: offset, database: target)
+            let result = await intelliSense.completionResult(script: source, offset: offset,
+                                                             database: target)
             guard !Task.isCancelled else { return }
-            await MainActor.run { self?.completionItems = items }
+            await MainActor.run {
+                guard let self else { return }
+                self.completionItems = result.items
+                self.completionIsMemberContext = result.isMemberContext
+                self.onCompletionsUpdated?()
+                // Nothing to complete against usually means the catalog never
+                // loaded; fetch it so the next keystroke has something to offer.
+                if !result.hasCatalog { self.ensureCatalogLoaded() }
+            }
         }
     }
 

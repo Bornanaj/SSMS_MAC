@@ -21,6 +21,10 @@ final class SQLTextView: NSTextView {
     var palette: Theme.SyntaxPalette = Theme.light
 
     private var completionTimer: Timer?
+    /// Set while a completion request is still in flight, holding the `force` flag of
+    /// the request that is waiting for it. Without it the popup would be decided
+    /// against a cache that is one keystroke old and simply never appear.
+    private var pendingCompletionForce: Bool?
     let completionPanel = CompletionPanelController()
 
     /// 1-based lines the user has bookmarked, mirrored into the gutter.
@@ -128,19 +132,34 @@ final class SQLTextView: NSTextView {
     }
 
     private func scheduleCompletionIfNeeded(after event: NSEvent) {
+        // Backspace keeps the list open and refilters it, the way every other editor
+        // behaves; it only closes once there is nothing left to filter by.
+        if event.keyCode == 51 {
+            guard completionPanel.isVisible else { return }
+            if rangeForUserCompletion.length == 0 && !isDirectlyAfterDot() {
+                completionTimer?.invalidate()
+                completionPanel.hide()
+            } else {
+                showCompletions(force: false)
+            }
+            return
+        }
+
         guard let characters = event.charactersIgnoringModifiers,
               let scalar = characters.unicodeScalars.first else { return }
-        let isWordCharacter = CharacterSet.letters.contains(scalar) || scalar == "_"
+        let wordCharacters = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_@#$"))
+        let isWordCharacter = wordCharacters.contains(scalar)
         let isDot = scalar == "."
 
         guard isWordCharacter || isDot else {
             // Anything else ends the current word, so the list has nothing left to filter.
             completionTimer?.invalidate()
+            pendingCompletionForce = nil
             completionPanel.hide()
             return
         }
 
-        if completionPanel.isVisible {
+        if completionPanel.isVisible && !isDot {
             // Already open: refilter immediately rather than waiting out the delay.
             showCompletions(force: false)
             return
@@ -155,9 +174,33 @@ final class SQLTextView: NSTextView {
                                                repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, self.window?.firstResponder === self else { return }
-                self.showCompletions(force: false)
+                // A dot has no prefix to filter by, so the list has to be asked for
+                // outright or it would close itself as soon as it opened.
+                self.showCompletions(force: isDot)
             }
         }
+    }
+
+    /// True when the caret sits straight after a qualifying dot, where the member list
+    /// is expected even though nothing has been typed to filter it.
+    private func isDirectlyAfterDot() -> Bool {
+        let start = rangeForUserCompletion.location
+        guard start > 0 else { return false }
+        let text = string as NSString
+        guard start <= text.length else { return false }
+        return text.substring(with: NSRange(location: start - 1, length: 1)) == "."
+    }
+
+    /// Called when the tab's candidate list has been recomputed; opens or re-ranks the
+    /// popup against the fresh list.
+    func completionsDidUpdate() {
+        guard let pending = pendingCompletionForce else {
+            if completionPanel.isVisible { showCompletions(force: false, isRefresh: true) }
+            return
+        }
+        pendingCompletionForce = nil
+        guard window?.firstResponder === self else { return }
+        showCompletions(force: pending, isRefresh: true)
     }
 
     // MARK: - Completion
@@ -167,6 +210,7 @@ final class SQLTextView: NSTextView {
     override func cancelOperation(_ sender: Any?) {
         completionTimer?.invalidate()
         completionTimer = nil
+        pendingCompletionForce = nil
         completionPanel.hide()
     }
 
@@ -191,17 +235,22 @@ final class SQLTextView: NSTextView {
         showCompletions(force: true)
     }
 
-    func showCompletions(force: Bool) {
+    /// `isRefresh` marks the pass that runs once a request has landed, so an empty
+    /// answer there is taken at face value instead of waiting for another one.
+    func showCompletions(force: Bool, isRefresh: Bool = false) {
         guard let delegate = sqlDelegate else { return }
         let range = rangeForUserCompletion
         let prefix = (string as NSString).substring(with: range)
-        if !force && prefix.isEmpty && !completionPanel.isVisible {
+        if !force && prefix.isEmpty && !isDirectlyAfterDot() && !completionPanel.isVisible {
             completionPanel.hide()
             return
         }
 
         let candidates = delegate.sqlTextViewCompletionCandidates(self)
         guard !candidates.isEmpty else {
+            // The list for this caret position may still be on its way; wait for it
+            // once rather than concluding there is nothing to show.
+            if !isRefresh { pendingCompletionForce = force }
             completionPanel.hide()
             return
         }
@@ -209,16 +258,22 @@ final class SQLTextView: NSTextView {
         let ranked = CompletionMatcher.filter(candidates, query: prefix,
                                               key: { $0.label },
                                               basePriority: { $0.sortPriority })
-        let entries = ranked.prefix(300).map {
-            CompletionEntry(item: $0.item, positions: $0.match.positions)
+        var seen = Set<String>()
+        let entries = ranked.prefix(300).compactMap { scored -> CompletionEntry? in
+            // Two providers can offer the same item; the popup keys its rows by id and
+            // would drop rows if a duplicate reached it.
+            guard seen.insert(scored.item.id).inserted else { return nil }
+            return CompletionEntry(item: scored.item, positions: scored.match.positions)
         }
         guard !entries.isEmpty else {
+            if !isRefresh { pendingCompletionForce = force }
             completionPanel.hide()
             return
         }
 
+        pendingCompletionForce = nil
         completionPanel.onChoose = { [weak self] _ in self?.commitCompletion() }
-        completionPanel.show(entries: Array(entries), below: caretRect(), in: self)
+        completionPanel.show(entries: entries, below: caretRect(), in: self)
     }
 
     func commitCompletion() {
@@ -327,6 +382,7 @@ final class SQLTextView: NSTextView {
     }
 
     override func resignFirstResponder() -> Bool {
+        pendingCompletionForce = nil
         completionPanel.hide()
         return super.resignFirstResponder()
     }

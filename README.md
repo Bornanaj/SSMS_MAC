@@ -127,7 +127,8 @@ swift build -c release          # libraries and executables
 - SQL Server authentication, Windows authentication (NTLMv2), Microsoft Entra ID access tokens
 - Encryption: mandatory (default), strict (TDS 8.0), or off; optional certificate trust
 - Named instances resolved through the SQL Browser (UDP 1434)
-- Saved connections with passwords in the login keychain, per‑connection tab colours
+- Saved connections listed by the name the engine reports (`@@SERVERNAME`), with the
+  address and login underneath; passwords in the login keychain, per‑connection tab colours
 - Azure SQL redirection (ENVCHANGE routing) is followed automatically
 
 **Object Explorer**

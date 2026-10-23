@@ -186,6 +186,21 @@ public struct CompletionItem: Sendable, Hashable, Identifiable {
     }
 }
 
+/// What the editor needs to know about a completion request, beyond the items: after a
+/// qualifier ("c." or "sales.") a keyword list is the wrong answer, and an empty list
+/// while the catalog is still loading is not the same as "nothing matches here".
+public struct CompletionResult: Sendable {
+    public var items: [CompletionItem]
+    public var isMemberContext: Bool
+    public var hasCatalog: Bool
+
+    public init(items: [CompletionItem], isMemberContext: Bool, hasCatalog: Bool) {
+        self.items = items
+        self.isMemberContext = isMemberContext
+        self.hasCatalog = hasCatalog
+    }
+}
+
 // MARK: - Provider
 
 /// Supplies context-aware completions. The catalog is refreshed in the background and
@@ -227,9 +242,25 @@ public actor IntelliSenseProvider {
     }
 
     public func completions(script: String, offset: Int, database: String) async -> [CompletionItem] {
+        await completionResult(script: script, offset: offset, database: database).items
+    }
+
+    public func completionResult(script: String, offset: Int,
+                                 database: String) async -> CompletionResult {
         let catalog = catalogs[database.lowercased()]
         let tokens = lexer.tokenize(script)
         let context = IntelliSenseContext.analyse(tokens: tokens, offset: offset)
+
+        let isMemberContext: Bool
+        if case .memberOf(_) = context.kind {
+            isMemberContext = true
+        } else {
+            isMemberContext = false
+        }
+        func result(_ items: [CompletionItem]) -> CompletionResult {
+            CompletionResult(items: items, isMemberContext: isMemberContext,
+                             hasCatalog: catalog != nil)
+        }
 
         // An ON clause with more than one table in scope is asking for the foreign key
         // that already describes the relationship.
@@ -248,7 +279,7 @@ public actor IntelliSenseProvider {
                                    insertText: suggestion.condition,
                                    sortPriority: 0)
                 }
-                return items + columnCompletions(context: context, catalog: catalog)
+                return result(items + columnCompletions(context: context, catalog: catalog))
             }
         }
 
@@ -258,37 +289,41 @@ public actor IntelliSenseProvider {
             if context.prefersRoutines, let catalog,
                catalog.schemas.contains(where: { $0.caseInsensitiveCompare(
                    IntelliSenseCatalog.unquote(qualifier)) == .orderedSame }) {
-                return catalog.routines
+                return result(catalog.routines
                     .filter { $0.schema.caseInsensitiveCompare(
                         IntelliSenseCatalog.unquote(qualifier)) == .orderedSame }
                     .map { CompletionItem.make(label: $0.name,
                                                kind: $0.kind == "procedure" ? .procedure : .function,
-                                               detail: $0.qualifiedName, priority: 60) }
+                                               detail: $0.qualifiedName, priority: 60) })
             }
-            return memberCompletions(qualifier: qualifier, context: context, catalog: catalog)
+            return result(memberCompletions(qualifier: qualifier, context: context,
+                                            catalog: catalog))
 
         case .tableReference:
             let aliases = generatesAliases
                 ? SQLAssist.aliasesInScope(script: script, offset: offset)
                 : []
-            return tableCompletions(catalog: catalog, aliasesInScope: aliases)
-                + schemaCompletions(catalog: catalog)
+            // Only a table reference takes an alias; the same table offered inside a
+            // SELECT list or a WHERE clause must insert its bare name.
+            return result(tableCompletions(catalog: catalog, aliasesInScope: aliases,
+                                           withAliases: generatesAliases)
+                + schemaCompletions(catalog: catalog))
 
         case .procedureReference:
-            return routineCompletions(catalog: catalog, kindFilter: "procedure")
+            return result(routineCompletions(catalog: catalog, kindFilter: "procedure"))
 
         case .columnReference:
-            return columnCompletions(context: context, catalog: catalog)
+            return result(columnCompletions(context: context, catalog: catalog)
                 + tableCompletions(catalog: catalog)
-                + keywordCompletions()
+                + keywordCompletions())
 
         case .variable:
-            return variableCompletions(context: context)
+            return result(variableCompletions(context: context))
 
         case .general:
-            return keywordCompletions()
+            return result(keywordCompletions()
                 + tableCompletions(catalog: catalog)
-                + routineCompletions(catalog: catalog, kindFilter: nil)
+                + routineCompletions(catalog: catalog, kindFilter: nil))
         }
     }
 
@@ -323,7 +358,8 @@ public actor IntelliSenseProvider {
     }
 
     private func tableCompletions(catalog: IntelliSenseCatalog?,
-                                  aliasesInScope: Set<String> = []) -> [CompletionItem] {
+                                  aliasesInScope: Set<String> = [],
+                                  withAliases: Bool = false) -> [CompletionItem] {
         guard let catalog else { return [] }
         return catalog.tables.map { object in
             var item = CompletionItem.make(
@@ -335,7 +371,7 @@ public actor IntelliSenseProvider {
                     .joined(separator: "\n")
                     + (object.columns.count > 8 ? "\n… \(object.columns.count - 8) more" : ""),
                 priority: object.schema.lowercased() == "dbo" ? 100 : 140)
-            if generatesAliases, !aliasesInScope.isEmpty || true {
+            if withAliases {
                 let alias = SQLAssist.suggestedAlias(for: object.name, existing: aliasesInScope)
                 item.insertText += " AS \(alias)"
             }
@@ -380,13 +416,19 @@ public actor IntelliSenseProvider {
                 let key = column.name.lowercased()
                 // A name that appears in two sources still deserves one entry each,
                 // qualified by the alias so the user can tell them apart.
-                let detail = "\(source.alias ?? object.name) · \(column.typeName)"
+                let qualifier = source.alias ?? object.name
+                let detail = "\(qualifier) · \(column.typeName)"
                     + (column.isNullable ? ", null" : ", not null")
-                items.append(.make(label: column.name,
-                                   kind: .column,
-                                   detail: detail,
-                                   documentation: column.isPrimaryKey ? "Primary key" : "",
-                                   priority: seen.insert(key).inserted ? 50 : 60))
+                var item = CompletionItem.make(label: column.name,
+                                               kind: .column,
+                                               detail: detail,
+                                               documentation: column.isPrimaryKey
+                                                   ? "Primary key" : "",
+                                               priority: seen.insert(key).inserted ? 50 : 60)
+                // The same column name in two sources is two entries, so the id has to
+                // carry the source: the popup keys its rows by it.
+                item.id = "column:\(qualifier.lowercased()).\(column.name.lowercased())"
+                items.append(item)
             }
             if let alias = source.alias {
                 items.append(.make(label: alias, kind: .alias,
