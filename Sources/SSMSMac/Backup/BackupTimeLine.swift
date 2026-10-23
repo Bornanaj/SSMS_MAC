@@ -90,13 +90,16 @@ enum TimeLineBuilder {
 
         let from: Date = max(now, start)
         if from < end {
-            for job in model.jobs where job.isEnabled {
+            // Log shipping copies files and raises alerts; only its backups and restores are drawn.
+            for job in model.jobs where job.isEnabled && !job.name.hasPrefix("LSCopy_") && !job.name.hasPrefix("LSAlert_") {
                 let names: [String] = databases(of: job, in: model.databases)
                 let rowsForJob: [Int] = names.compactMap { index[$0.lowercased()] }
                 guard !rowsForJob.isEmpty else { continue }
                 let duration: TimeInterval = max(job.averageDuration ?? 60, 30)
-                let kind: BackupActivity.Kind = job.config?.kind == .restoreVerification ? .restore : .backup
-                let code: String = job.config?.backup?.type.historyCode ?? (kind == .restore ? "D" : codeFromName(job.name))
+                let restores: Bool = job.config?.kind == .restoreVerification || job.name.hasPrefix("LSRestore_")
+                let kind: BackupActivity.Kind = restores ? .restore : .backup
+                let code: String = job.config?.backup?.type.historyCode
+                    ?? (job.config?.kind == .restoreVerification ? "D" : codeFromName(job.name))
                 for schedule in job.schedules {
                     for date in schedule.occurrences(from: from, to: end, limit: 400) {
                         for row in rowsForJob {
@@ -157,7 +160,8 @@ enum TimeLineBuilder {
 
     private static func codeFromName(_ name: String) -> String {
         let upper: String = name.uppercased()
-        if upper.contains("LOG") || upper.contains("LSBACKUP") { return "L" }
+        // Log shipping jobs (LSBackup_, LSRestore_) back up and restore logs.
+        if upper.contains("LOG") || upper.hasPrefix("LS") { return "L" }
         if upper.contains("DIFF") { return "I" }
         return "D"
     }

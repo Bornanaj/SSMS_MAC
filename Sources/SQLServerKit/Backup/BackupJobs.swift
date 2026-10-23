@@ -637,6 +637,9 @@ public struct BackupJobInfo: Identifiable, Hashable, Sendable {
     public var lastMessage: String
     public var averageDuration: TimeInterval?
     public var isRunning: Bool
+    /// For log shipping jobs, the database msdb's log shipping tables tie the job to: the
+    /// primary for a backup job, the standby for copy and restore jobs.
+    public var logShippingDatabase: String = ""
 
     public var isManaged: Bool { config != nil }
 
@@ -647,7 +650,13 @@ public struct BackupJobInfo: Identifiable, Hashable, Sendable {
             case .restoreVerification: return "Restore verification"
             }
         }
-        if category == "Log Shipping" { return "Log shipping" }
+        if category == "Log Shipping" {
+            if name.hasPrefix("LSBackup_") { return "Log shipping backup" }
+            if name.hasPrefix("LSCopy_") { return "Log shipping copy" }
+            if name.hasPrefix("LSRestore_") { return "Log shipping restore" }
+            if name.hasPrefix("LSAlert_") { return "Log shipping alert" }
+            return "Log shipping"
+        }
         return "Other backup job"
     }
 
@@ -658,6 +667,7 @@ public struct BackupJobInfo: Identifiable, Hashable, Sendable {
             case .restoreVerification: return config.restore?.sourceDatabase ?? ""
             }
         }
+        if !logShippingDatabase.isEmpty { return logShippingDatabase }
         return BackupJobManager.databaseHint(jobName: name)
     }
 
@@ -725,7 +735,12 @@ public struct BackupJobManager: Sendable {
                CASE WHEN EXISTS (SELECT 1 FROM msdb.dbo.sysjobactivity AS a WHERE a.job_id = j.job_id
                                  AND a.start_execution_date IS NOT NULL AND a.stop_execution_date IS NULL
                                  AND a.session_id = (SELECT MAX(session_id) FROM msdb.dbo.syssessions))
-                    THEN 1 ELSE 0 END AS running
+                    THEN 1 ELSE 0 END AS running,
+               COALESCE((SELECT TOP (1) pd.primary_database FROM msdb.dbo.log_shipping_primary_databases AS pd
+                         WHERE pd.backup_job_id = j.job_id),
+                        (SELECT TOP (1) sd.secondary_database FROM msdb.dbo.log_shipping_secondary AS ls
+                         JOIN msdb.dbo.log_shipping_secondary_databases AS sd ON sd.secondary_id = ls.secondary_id
+                         WHERE ls.copy_job_id = j.job_id OR ls.restore_job_id = j.job_id), N'') AS ls_database
         FROM msdb.dbo.sysjobs AS j
         LEFT JOIN msdb.dbo.syscategories AS c ON c.category_id = j.category_id
         WHERE c.name IN (\(categories))
@@ -770,7 +785,7 @@ public struct BackupJobManager: Sendable {
             default: status = "Never run"
             }
             let average = row.isNull("average_seconds") ? nil : row.double("average_seconds")
-            return BackupJobInfo(id: id, name: row.string("name"), isEnabled: row.int("enabled") == 1,
+            var info = BackupJobInfo(id: id, name: row.string("name"), isEnabled: row.int("enabled") == 1,
                                  category: row.string("category"), jobDescription: row.string("description"),
                                  owner: row.string("owner"), command: command,
                                  config: BackupJobConfig.parse(fromCommand: command),
@@ -780,6 +795,8 @@ public struct BackupJobManager: Sendable {
                                  lastRun: ServerTime.fromAgent(date: row.int("last_date"), time: row.int("last_time")),
                                  lastOutcome: status, lastMessage: row.string("last_message"),
                                  averageDuration: average, isRunning: row.int("running") == 1)
+            info.logShippingDatabase = row.string("ls_database")
+            return info
         }
     }
 
