@@ -61,9 +61,7 @@ public struct PlanStatement: Identifiable, Hashable, Sendable {
 public enum ShowplanParser {
 
     public static func parse(_ xml: String) -> [PlanStatement] {
-        guard let document = try? XMLDocument(xmlString: xml, options: [.nodePreserveWhitespace]) else {
-            return []
-        }
+        guard let document = parseDocument(xml) else { return [] }
         guard let root = document.rootElement() else { return [] }
 
         var statements: [PlanStatement] = []
@@ -86,6 +84,23 @@ public enum ShowplanParser {
             statements.append(statement)
         }
         return statements
+    }
+
+    /// A plan read from the server arrives as bare XML, but a `.sqlplan` saved by SSMS
+    /// starts with `<?xml version="1.0" encoding="utf-16"?>`. Once the file has been
+    /// decoded into a String that declaration is a lie, and the parser refuses the
+    /// document over it — so on a failure the declaration is dropped and the body is
+    /// parsed on its own.
+    private static func parseDocument(_ xml: String) -> XMLDocument? {
+        if let document = try? XMLDocument(xmlString: xml, options: [.nodePreserveWhitespace]) {
+            return document
+        }
+        let trimmed = xml.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("<?xml"), let end = trimmed.range(of: "?>") else { return nil }
+        let body = String(trimmed[end.upperBound...])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty else { return nil }
+        return try? XMLDocument(xmlString: body, options: [.nodePreserveWhitespace])
     }
 
     private static func parseRelOp(_ element: XMLElement) -> PlanNode {

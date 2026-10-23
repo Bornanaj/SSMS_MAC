@@ -60,6 +60,16 @@ func runPlanTests(_ t: TestRunner) {
         t.expect(statements.first?.root?.operatorCost ?? 0 > 0,
                  "the root keeps the cost its children do not account for")
         t.expect(ShowplanParser.parse("not xml at all").isEmpty, "garbage parses to nothing")
+
+        // The fixture above carries the `encoding="utf-16"` declaration a .sqlplan file
+        // saved by SSMS starts with, which is what this parses past; the same plan
+        // without a declaration is the shape the server returns.
+        let bare = plan(statementCost: 0.5, outer: "Nested Loops", inner: "Index Seek",
+                        innerCost: 0.1, innerIndex: "IX_Orders_Date")
+            .replacingOccurrences(of: "<?xml version=\"1.0\" encoding=\"utf-16\"?>", with: "")
+        t.equal(ShowplanParser.parse(bare).count, 1, "a plan without a declaration parses")
+        t.expect(ShowplanParser.parse("<?xml version=\"1.0\" encoding=\"utf-16\"?>").isEmpty,
+                 "a declaration with no document behind it parses to nothing")
     }
 
     t.suite("plan comparison") {

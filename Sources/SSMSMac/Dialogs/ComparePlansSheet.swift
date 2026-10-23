@@ -187,7 +187,22 @@ struct ComparePlansSheet: View {
         panel.message = "Choose a .sqlplan or showplan .xml file"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
-            let text = try String(contentsOf: url, encoding: .utf8)
+            // SSMS writes .sqlplan as UTF-16, so the encoding is detected rather than
+            // assumed; a plan copied out of a query window is usually UTF-8.
+            var encoding = String.Encoding.utf8
+            let text: String
+            if let detected = try? String(contentsOf: url, usedEncoding: &encoding) {
+                text = detected
+            } else {
+                let data = try Data(contentsOf: url)
+                guard let decoded = String(data: data, encoding: .utf16)
+                        ?? String(data: data, encoding: .utf8) else {
+                    isError = true
+                    status = "That file is not text this app can read."
+                    return
+                }
+                text = decoded
+            }
             load(xml: text, source: url.lastPathComponent)
         } catch {
             isError = true
