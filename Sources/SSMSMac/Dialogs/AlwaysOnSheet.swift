@@ -8,9 +8,15 @@ import SQLServerKit
 /// and the user runs it — failing a production group over is not a thing to do on a
 /// mis-click.
 struct AlwaysOnSheet: View {
+    @EnvironmentObject var app: AppState
     @Environment(\.dismiss) private var dismiss
     let server: ConnectedServer
     var initialGroup: String?
+
+    /// The password of the connection this dashboard was opened on. The replicas of a
+    /// group usually share a login, so it is what the other instances are dialled with
+    /// until the plan window is told otherwise.
+    @State private var templatePassword = ""
 
     enum Detail: String, CaseIterable, Identifiable {
         case replicas, databases, listeners, cluster, issues
@@ -45,6 +51,7 @@ struct AlwaysOnSheet: View {
     @State private var unavailable: String?
 
     @State private var pendingScript: PendingScript?
+    @State private var pendingPlan: ScriptPlanLaunch?
     @State private var replicaEditor: AvailabilityReplica?
     @State private var showGroupProperties = false
     @State private var showAddDatabase = false
@@ -100,9 +107,14 @@ struct AlwaysOnSheet: View {
         }
         .frame(width: 1120, height: 720)
         .task { await load() }
+        .task { await loadTemplatePassword() }
         .task(id: selectedGroupName) { await loadDetail() }
         .sheet(item: $pendingScript) { pending in
             ScriptConfirmSheet(pending: pending) { script in await runScript(script) }
+        }
+        .sheet(item: $pendingPlan) { launch in
+            ScriptPlanSheet(launch: launch, app: app, templatePassword: templatePassword)
+                .environmentObject(app)
         }
         .sheet(item: $replicaEditor) { replica in
             AvailabilityReplicaSheet(group: group?.name ?? "", replica: replica) { script in
@@ -121,17 +133,15 @@ struct AlwaysOnSheet: View {
         .sheet(isPresented: $showAddDatabase) {
             if let group {
                 AvailabilityAddDatabaseSheet(server: server, group: group,
-                                             replicas: replicas) { script in
-                    pendingScript = PendingScript(title: "Add databases to \(group.name)",
-                                                  script: script)
+                                             replicas: replicas) { names in
+                    startAddDatabases(names)
                 }
             }
         }
         .sheet(isPresented: $showAddReplica) {
             if let group {
-                AvailabilityAddReplicaSheet(group: group) { script in
-                    pendingScript = PendingScript(title: "Add replica to \(group.name)",
-                                                  script: script)
+                AvailabilityAddReplicaSheet(group: group) { replica in
+                    startAddReplica(replica)
                 }
             }
         }
@@ -205,6 +215,9 @@ struct AlwaysOnSheet: View {
                 .disabled(selectedListener == nil)
                 Button("Remove Listener…") { removeListener() }
                     .disabled(selectedListener == nil)
+                Divider()
+                Button("Resume Data Movement Everywhere…") { resumeEverywhere() }
+                    .disabled(!databases.contains { $0.isSuspended })
                 Divider()
                 Button("Grant CREATE ANY DATABASE…") { grantSeedingPermission(true) }
                 Button("Deny CREATE ANY DATABASE…") { grantSeedingPermission(false) }
@@ -493,28 +506,70 @@ struct AlwaysOnSheet: View {
 
     // MARK: - Actions
 
+    /// Builds the failover as a plan and opens the step runner, which connects to the
+    /// replica taking over and runs the statement there — the only instance that can
+    /// carry it out.
     private func failover(allowDataLoss: Bool) {
         guard let group, let replica = selectedReplica else { return }
-        guard let script = try? AvailabilityGroupScripts.failoverScript(
-            group: group.name, targetReplica: replica.serverName,
-            allowDataLoss: allowDataLoss) else { return }
+        do {
+            let plan = try AvailabilityGroupPlans.failover(group: group,
+                                                           target: replica,
+                                                           replicas: replicas,
+                                                           databases: databases,
+                                                           allowDataLoss: allowDataLoss)
+            pendingPlan = ScriptPlanLaunch(plan: plan, server: server)
+        } catch {
+            isError = true
+            status = String(describing: error)
+        }
+    }
 
-        var text = script
-        if replica.isLocal {
-            text += "\n\n-- This instance hosts that replica, so Run carries it out here."
-        } else {
-            text += "\n\n-- This session is connected to \(server.displayName), not to "
-                + "\(replica.serverName).\n-- Copy the statement and run it there, or connect "
-                + "to that replica first."
+    /// Everything a plan touches beyond this connection needs credentials; the ones
+    /// this dashboard was opened with are the starting point.
+    private func loadTemplatePassword() async {
+        guard templatePassword.isEmpty else { return }
+        templatePassword = await app.connections.password(for: server.profile) ?? ""
+    }
+
+    /// Adding a replica spans two instances: the ADD on the primary and the JOIN on the
+    /// new secondary. The plan carries both, and the runner connects to each.
+    private func startAddReplica(_ replica: AvailabilityReplica) {
+        guard let group else { return }
+        do {
+            let plan = try AvailabilityGroupPlans.addReplica(
+                group: group, replica: replica,
+                supportsSeeding: server.serverInfo.majorVersion >= 14)
+            pendingPlan = ScriptPlanLaunch(plan: plan, server: server)
+        } catch {
+            isError = true
+            status = String(describing: error)
         }
-        if allowDataLoss {
-            text += "\n-- Forced failover discards whatever has not reached this replica."
+    }
+
+    private func startAddDatabases(_ names: [String]) {
+        guard let group else { return }
+        do {
+            let plan = try AvailabilityGroupPlans.addDatabases(group: group, databases: names,
+                                                               replicas: replicas)
+            pendingPlan = ScriptPlanLaunch(plan: plan, server: server)
+        } catch {
+            isError = true
+            status = String(describing: error)
         }
-        pendingScript = PendingScript(
-            title: allowDataLoss ? "Forced failover to \(replica.serverName)"
-                                 : "Failover to \(replica.serverName)",
-            script: text,
-            destructive: true)
+    }
+
+    /// Resuming is per replica, so a group with several suspended databases on several
+    /// replicas is a plan rather than one statement.
+    private func resumeEverywhere() {
+        guard let group else { return }
+        do {
+            let plan = try AvailabilityGroupPlans.resumeEverywhere(group: group,
+                                                                   databases: databases)
+            pendingPlan = ScriptPlanLaunch(plan: plan, server: server)
+        } catch {
+            isError = true
+            status = String(describing: error)
+        }
     }
 
     private func removeDatabase() {

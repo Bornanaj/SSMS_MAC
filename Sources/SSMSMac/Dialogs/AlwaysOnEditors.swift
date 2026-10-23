@@ -250,7 +250,9 @@ struct AvailabilityAddDatabaseSheet: View {
     let server: ConnectedServer
     let group: AvailabilityGroup
     let replicas: [AvailabilityReplica]
-    var onScript: (String) -> Void
+    /// The databases the user picked. Adding them spans the primary and every
+    /// secondary, so the dashboard turns this into a plan rather than one script.
+    var onDatabases: ([String]) -> Void
 
     @State private var candidates: [AvailabilityCandidateDatabase] = []
     @State private var selection: Set<String> = []
@@ -323,31 +325,20 @@ struct AvailabilityAddDatabaseSheet: View {
     private func apply() {
         let names = candidates.filter { selection.contains($0.id) }.map(\.name)
         let notReady = candidates.filter { selection.contains($0.id) && !$0.isReady }
-        do {
-            var script = "-- Run this on the primary, \(group.primaryReplica).\n"
-            script += try AvailabilityGroupScripts.addDatabases(group: group.name,
-                                                                databases: names)
-            if !notReady.isEmpty {
-                let list = notReady.map(\.name).joined(separator: ", ")
-                script = "-- \(list): not ready yet. A database joins a group only in the "
-                    + "full\n-- recovery model and after a full backup.\n" + script
-            }
-            if !usesAutomaticSeeding {
-                script += "\n\n-- Then, on each manually seeded secondary, after restoring "
-                    + "WITH NORECOVERY:\n"
-                script += names
-                    .compactMap {
-                        try? AvailabilityGroupScripts.joinDatabaseOnSecondary(group: group.name,
-                                                                              database: $0)
-                    }
-                    .map { "-- \($0)" }
-                    .joined(separator: "\n")
-            }
-            onScript(script)
-            dismiss()
-        } catch {
-            self.error = String(describing: error)
+        guard notReady.isEmpty else {
+            // The engine's error for this is "database is not in the full recovery
+            // model", three statements into a plan. Better to say it here.
+            error = "\(notReady.map(\.name).joined(separator: ", ")): "
+                + "a database joins a group only in the full recovery model and after a "
+                + "full backup."
+            return
         }
+        guard !names.isEmpty else {
+            error = "Select at least one database."
+            return
+        }
+        onDatabases(names)
+        dismiss()
     }
 }
 
@@ -356,7 +347,9 @@ struct AvailabilityAddDatabaseSheet: View {
 struct AvailabilityAddReplicaSheet: View {
     @Environment(\.dismiss) private var dismiss
     let group: AvailabilityGroup
-    var onScript: (String) -> Void
+    /// The replica to add. The ADD runs on the primary and the JOIN on the new
+    /// secondary, so the dashboard turns this into a two-instance plan.
+    var onReplica: (AvailabilityReplica) -> Void
 
     @State private var serverName = ""
     @State private var endpointURL = ""
@@ -427,6 +420,10 @@ struct AvailabilityAddReplicaSheet: View {
     }
 
     private func apply() {
+        if failoverMode == .automatic && availabilityMode != .synchronousCommit {
+            error = "Automatic failover requires synchronous commit on this replica."
+            return
+        }
         let replica = AvailabilityReplica(
             groupName: group.name,
             serverName: serverName,
@@ -436,19 +433,8 @@ struct AvailabilityAddReplicaSheet: View {
             seedingMode: seedingMode,
             secondaryRoleConnections: secondaryConnections,
             backupPriority: backupPriority)
-        do {
-            var script = "-- On the primary, \(group.primaryReplica):\n"
-            script += try AvailabilityGroupScripts.addReplica(group: group.name, replica: replica)
-            script += "\n\n-- Then, on \(serverName):\n"
-            let join = try AvailabilityGroupScripts.joinGroupOnSecondary(
-                group: group.name,
-                clusterType: group.clusterTypeDescription)
-            script += join.split(separator: "\n").map { "-- \($0)" }.joined(separator: "\n")
-            onScript(script)
-            dismiss()
-        } catch {
-            self.error = String(describing: error)
-        }
+        onReplica(replica)
+        dismiss()
     }
 }
 

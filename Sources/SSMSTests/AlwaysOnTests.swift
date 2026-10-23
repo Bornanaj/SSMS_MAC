@@ -336,6 +336,178 @@ func runAlwaysOnTests(_ t: TestRunner) {
                  "an unreachable commit requirement is reported")
     }
 
+    // MARK: - Multi-instance plans
+
+    t.suite("always on failover plan") {
+        let group = AvailabilityGroup(name: "AG", primaryReplica: "NODE1",
+                                      clusterTypeDescription: "WSFC")
+        let primary = AvailabilityReplica(serverName: "NODE1", role: "PRIMARY",
+                                          availabilityMode: .synchronousCommit,
+                                          failoverMode: .automatic)
+        let synchronous = AvailabilityReplica(serverName: "NODE2", role: "SECONDARY",
+                                              availabilityMode: .synchronousCommit,
+                                              failoverMode: .automatic)
+        let asynchronous = AvailabilityReplica(serverName: "NODE3", role: "SECONDARY",
+                                               availabilityMode: .asynchronousCommit,
+                                               failoverMode: .manual)
+        let databases = [
+            AvailabilityDatabaseState(databaseName: "Sales", replicaServerName: "NODE2"),
+            AvailabilityDatabaseState(databaseName: "Orders", replicaServerName: "NODE2")
+        ]
+
+        let planned = try? AvailabilityGroupPlans.failover(
+            group: group, target: synchronous, replicas: [primary, synchronous],
+            databases: databases, allowDataLoss: false)
+        t.expect(planned != nil, "a synchronous replica can take a planned failover")
+        t.equal(planned?.steps.count, 3, "check, fail over, confirm")
+        t.expect(planned?.steps.allSatisfy { $0.instance == "NODE2" } == true,
+                 "every step runs on the replica taking over, not on the primary",
+                 planned?.steps.map(\.instance).joined(separator: ", ") ?? "")
+        t.expect(planned?.steps[1].script.contains("ALTER AVAILABILITY GROUP [AG] FAILOVER;")
+                 == true, "the failover statement itself", planned?.steps[1].script ?? "")
+        t.expect(planned?.steps[0].isReadOnly == true, "the first step only reads")
+        t.expect(planned?.steps[2].isReadOnly == true, "and so does the confirmation")
+        t.equal(planned?.instances, ["NODE2"], "one instance to connect to")
+
+        // A planned failover to an asynchronous replica is refused rather than quietly
+        // turned into a forced one.
+        t.expect((try? AvailabilityGroupPlans.failover(
+            group: group, target: asynchronous, replicas: [primary, asynchronous],
+            databases: databases, allowDataLoss: false)) == nil,
+                 "a planned failover to an asynchronous replica is refused")
+
+        t.expect((try? AvailabilityGroupPlans.failover(
+            group: group, target: primary, replicas: [primary], databases: [],
+            allowDataLoss: false)) == nil,
+                 "failing over to the current primary is refused")
+
+        let forced = try? AvailabilityGroupPlans.failover(
+            group: group, target: asynchronous, replicas: [primary, synchronous, asynchronous],
+            databases: databases, allowDataLoss: true)
+        t.expect(forced != nil, "a forced failover to an asynchronous replica is allowed")
+        t.expect(forced?.steps.contains { $0.script.contains("FORCE_FAILOVER_ALLOW_DATA_LOSS") }
+                 == true, "the forced statement is used")
+        // A forced failover suspends every other replica, so the plan has to resume them.
+        let resumeSteps = forced?.steps.filter { $0.title.hasPrefix("Resume") } ?? []
+        t.equal(resumeSteps.count, 2, "one resume step per other replica")
+        t.expect(Set(resumeSteps.map(\.instance)) == ["NODE1", "NODE2"],
+                 "resumes run on the replicas that were left behind",
+                 resumeSteps.map(\.instance).joined(separator: ", "))
+        t.expect(resumeSteps.first?.script.contains("SET HADR RESUME") == true,
+                 "with the resume statement for each database")
+        t.expect(resumeSteps.allSatisfy(\.continuesOnFailure),
+                 "one replica refusing to resume does not stop the others")
+        t.equal(forced?.instances.first, "NODE3",
+                "the replica taking over is connected first")
+    }
+
+    t.suite("always on add replica plan") {
+        let group = AvailabilityGroup(name: "AG", primaryReplica: "NODE1",
+                                      clusterTypeDescription: "WSFC")
+        let replica = AvailabilityReplica(serverName: "NODE4",
+                                          endpointURL: "TCP://node4:5022",
+                                          availabilityMode: .synchronousCommit,
+                                          failoverMode: .manual,
+                                          seedingMode: .automatic)
+        let plan = try? AvailabilityGroupPlans.addReplica(group: group, replica: replica,
+                                                          supportsSeeding: true)
+        t.expect(plan != nil, "the plan is built")
+        t.equal(plan?.steps.first?.instance, "NODE1", "the ADD runs on the primary")
+        t.equal(plan?.steps.dropFirst().first?.instance, "NODE4",
+                "the JOIN runs on the new replica")
+        t.equal(plan?.instances, ["NODE1", "NODE4"], "two instances, in the order needed")
+        t.expect(plan?.steps.last?.isReadOnly == true, "it ends on a check")
+
+        var manual = replica
+        manual.seedingMode = .manual
+        let manualPlan = try? AvailabilityGroupPlans.addReplica(group: group, replica: manual,
+                                                                supportsSeeding: true)
+        t.expect(manualPlan?.steps.contains { $0.title.hasPrefix("Restore") } == true,
+                 "a manually seeded replica gets its restore step")
+
+        var orphan = group
+        orphan.primaryReplica = ""
+        t.expect((try? AvailabilityGroupPlans.addReplica(group: orphan, replica: replica,
+                                                         supportsSeeding: true)) == nil,
+                 "with no primary there is nowhere to run the ADD")
+    }
+
+    t.suite("always on database plans") {
+        let group = AvailabilityGroup(name: "AG", primaryReplica: "NODE1")
+        let automatic = AvailabilityReplica(serverName: "NODE2", role: "SECONDARY",
+                                            seedingMode: .automatic)
+        let manual = AvailabilityReplica(serverName: "NODE3", role: "SECONDARY",
+                                         seedingMode: .manual)
+        let plan = try? AvailabilityGroupPlans.addDatabases(
+            group: group, databases: ["Sales"],
+            replicas: [AvailabilityReplica(serverName: "NODE1", role: "PRIMARY"),
+                       automatic, manual])
+        t.equal(plan?.steps.first?.instance, "NODE1", "the ADD runs on the primary")
+        t.equal(plan?.steps.count, 3, "primary, then one step per secondary")
+        t.expect(plan?.steps.last?.script.contains("SET HADR AVAILABILITY GROUP = [AG]") == true,
+                 "the manually seeded replica joins the database by hand",
+                 plan?.steps.last?.script ?? "")
+        t.expect((try? AvailabilityGroupPlans.addDatabases(group: group, databases: [],
+                                                           replicas: [])) == nil,
+                 "no database, no plan")
+
+        let suspended = [
+            AvailabilityDatabaseState(databaseName: "Sales", replicaServerName: "NODE2",
+                                      isSuspended: true),
+            AvailabilityDatabaseState(databaseName: "Orders", replicaServerName: "NODE2",
+                                      isSuspended: true),
+            AvailabilityDatabaseState(databaseName: "Sales", replicaServerName: "NODE3",
+                                      isSuspended: true),
+            AvailabilityDatabaseState(databaseName: "Orders", replicaServerName: "NODE3")
+        ]
+        let resume = try? AvailabilityGroupPlans.resumeEverywhere(group: group,
+                                                                   databases: suspended)
+        t.equal(resume?.steps.count, 2, "one step per replica that holds a suspended database")
+        t.expect(resume?.steps.first?.script.components(separatedBy: "SET HADR RESUME").count
+                 == 3, "both suspended databases on that replica are resumed",
+                 resume?.steps.first?.script ?? "")
+        t.expect((try? AvailabilityGroupPlans.resumeEverywhere(
+            group: group,
+            databases: [AvailabilityDatabaseState(databaseName: "Sales",
+                                                  replicaServerName: "NODE2")])) == nil,
+                 "nothing suspended, nothing to resume")
+    }
+
+    t.suite("script plan bookkeeping") {
+        let steps = [
+            ScriptStep(title: "One", instance: "NODE1", script: "SELECT 1;"),
+            ScriptStep(title: "Two", instance: "NODE2", script: "SELECT 2;"),
+            ScriptStep(title: "Three", instance: "NODE1", script: "SELECT 3;",
+                       continuesOnFailure: true)
+        ]
+        var plan = ScriptPlan(title: "Plan", steps: steps)
+        t.equal(plan.instances, ["NODE1", "NODE2"], "instances are distinct and ordered")
+        t.equal(plan.nextRunnableIndex(), 0, "the first step is next")
+        t.expect(!plan.isFinished, "nothing has run yet")
+
+        plan.record(ScriptStepOutcome(state: .succeeded, message: "ok"), for: steps[0])
+        t.equal(plan.nextRunnableIndex(), 1, "the second step follows")
+        t.equal(plan.progress, 1.0 / 3, "progress counts finished steps")
+
+        plan.record(ScriptStepOutcome(state: .failed, message: "boom"), for: steps[1])
+        t.expect(plan.hasFailure, "a failed step is a failure")
+        t.expect(plan.nextRunnableIndex() == nil,
+                 "a plan that stops on failure does not offer the next step")
+
+        plan.stopsOnFailure = false
+        t.equal(plan.nextRunnableIndex(), 2, "unless it is told to carry on")
+
+        // A step marked as continuing is not what stops a plan.
+        var tolerant = ScriptPlan(title: "Plan", steps: steps)
+        tolerant.record(ScriptStepOutcome(state: .failed), for: steps[2])
+        t.expect(!tolerant.hasFailure, "a tolerated failure does not stop the plan")
+
+        plan.reset()
+        t.equal(plan.nextRunnableIndex(), 0, "reset puts every step back to pending")
+        t.expect(plan.statusLine.hasPrefix("0 of 3"), "the status line counts steps",
+                 plan.statusLine)
+    }
+
     t.suite("always on candidate databases") {
         let ready = AvailabilityCandidateDatabase(name: "Sales", recoveryModel: "FULL",
                                                   hasLogBackup: true)
