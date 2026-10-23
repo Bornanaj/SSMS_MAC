@@ -13,6 +13,11 @@ struct CompareLaunch: Codable, Hashable {
     var serverID: UUID?
     var database: String?
     var projectPath: String?
+    /// Compare windows: the target database on the same server; with it set the comparison
+    /// runs straight away (object level recovery compares a restored copy with the original).
+    var targetDatabase: String?
+    /// SQL Backup: the wizard to open first ("backup", "schedule", "restore", "verify").
+    var action: String?
 }
 
 // MARK: - Sessions

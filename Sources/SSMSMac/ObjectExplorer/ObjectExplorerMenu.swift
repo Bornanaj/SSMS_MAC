@@ -51,6 +51,9 @@ struct ObjectExplorerMenu: View {
         Button("Logins…") {
             if let server = app.server(for: node) { app.activeSheet = .logins(server.id) }
         }
+        Button("SQL Backup…") {
+            openWindow(id: "sql-backup", value: CompareLaunch(serverID: app.server(for: node)?.id))
+        }
         Divider()
         refreshItem
         Button("Disconnect") {
@@ -71,6 +74,14 @@ struct ObjectExplorerMenu: View {
             if let server = app.server(for: node), let name = node.name {
                 app.activeSheet = .generateScripts(server.id, name)
             }
+        }
+        Menu("SQL Backup") {
+            Button("Back Up…") { openBackup(action: "backup") }
+            Button("Schedule Backup Jobs…") { openBackup(action: "schedule") }
+            Button("Restore…") { openBackup(action: "restore") }
+            Button("Schedule Restore Jobs…") { openBackup(action: "verify") }
+            Divider()
+            Button("Open SQL Backup") { openBackup(action: nil) }
         }
         Menu("Compare") {
             Button("Schema Compare…") {
@@ -366,6 +377,12 @@ struct ObjectExplorerMenu: View {
     private func newQuery(database: String?) {
         guard let server = app.server(for: node) else { return }
         Task { await app.newQueryTab(server: server, database: database) }
+    }
+
+    /// Opens the SQL Backup window on this database, starting the wizard named by `action`.
+    private func openBackup(action: String?) {
+        openWindow(id: "sql-backup",
+                   value: CompareLaunch(serverID: app.server(for: node)?.id, database: node.name, action: action))
     }
 
     private func copyName() {

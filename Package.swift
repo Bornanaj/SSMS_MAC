@@ -10,7 +10,8 @@ let package = Package(
         .executable(name: "ssms-mac", targets: ["SSMSMac"]),
         .executable(name: "tdscli", targets: ["TDSCLI"]),
         .executable(name: "ssms-tests", targets: ["SSMSTests"]),
-        .executable(name: "ssms-compare", targets: ["SSMSCompare"])
+        .executable(name: "ssms-compare", targets: ["SSMSCompare"]),
+        .executable(name: "ssms-backup", targets: ["SSMSBackup"])
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
@@ -49,6 +50,11 @@ let package = Package(
         ),
         .executableTarget(
             name: "SSMSCompare",
+            dependencies: ["SQLServerKit", "TDSKit"],
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
+        .executableTarget(
+            name: "SSMSBackup",
             dependencies: ["SQLServerKit", "TDSKit"],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),

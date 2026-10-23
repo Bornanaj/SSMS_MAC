@@ -271,3 +271,49 @@ deployment never leaves a key untrusted (which would silently stop the optimizer
 Dates are written in the forms SQL Server documents as language-neutral (`'20240304'`,
 `'2024-03-04T10:00:00.123'`), because the script may run under a login whose language
 reads `2024-03-04` as the 3rd of April.
+
+## SQL Backup drives SQL Server's own BACKUP and RESTORE
+
+Redgate SQL Backup writes its own `.sqb` format through an extended stored procedure and a
+Windows service. Here everything goes through T-SQL on the ordinary connection, so the
+backups are plain `.bak` / `.trn` files any SQL Server can restore, and nothing is installed
+on the server. The wizard's choices map onto native options: compression levels onto
+`NO_COMPRESSION`, `COMPRESSION`, `MS_XPRESS`, `QAT_DEFLATE` or `ZSTD` depending on the
+version and hardware (`BackupServerCapabilities.compressionClause`), striping onto several
+`TO DISK` clauses, copying to a second folder onto `MIRROR TO` (Enterprise and Developer
+only), password encryption onto certificate encryption, and Redgate's `ERASEFILES` onto a
+retention script. Every backup is written `WITH FORMAT, INIT`: when overwriting is off the
+files are checked with `xp_fileexist` first, so FORMAT only ever replaces a file the user
+asked to replace, and each file holds exactly one backup set, which is what makes deleting
+old backups file by file safe.
+
+Retention does not list the folder. It reads `msdb.dbo.backupset` and `backupmediafamily`
+for sets of the same database and type whose files sit directly in that folder, keeps the
+ones the rule keeps, and deletes with `xp_delete_file` only files no kept set still uses.
+A file some other tool wrote, or one in a subfolder, is never touched. The same text runs
+inside Agent jobs, where the database and folder are only known at run time, so it is built
+from T-SQL expressions, and every variable carries a suffix: T-SQL variables live for the
+whole batch, and a table variable declared inside a loop keeps its rows between passes.
+
+Server times are not converted. Backup history, `STOPAT` and Agent schedules are all in the
+server's wall clock, whose time zone the client cannot learn reliably, so `ServerTime`
+keeps them as `Date`s whose UTC reading is that wall-clock time and always formats them
+with a UTC calendar (date pickers included). A time read from msdb therefore goes back into
+`STOPAT` or a schedule unchanged, and the window shows the times SSMS shows.
+
+## Restore chains are built from LSNs
+
+`RestoreChainBuilder` applies the rules SQL Server itself enforces rather than trusting
+dates: a differential belongs to the full whose `checkpoint_lsn` equals its
+`database_backup_lsn`; the first log after a base is the one whose LSN range contains the
+base's `last_lsn`; each further log starts where the previous one ended. LSNs are
+`numeric(25,0)`, so they are compared as digit strings (`LSN`), never through `Double`. A
+point-in-time restore tries the newest usable base first and falls back to older ones, so a
+broken log chain after a recent differential still restores from the full before it. Backups
+made by other tools through a virtual device (`device_type` 7) are listed but never chosen,
+and copy-only backups never take part in a chain they did not start.
+
+Jobs carry their own configuration. A scheduled backup or restore job is an ordinary Agent
+job whose T-SQL step starts with a comment holding the wizard's options as base64 JSON
+(`BackupJobConfig.comment`), which is how the Jobs tab knows a job is ours, what it backs
+up, and how to open it in the wizard again — with no table of our own in msdb.

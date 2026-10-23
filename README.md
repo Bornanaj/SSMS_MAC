@@ -9,8 +9,8 @@ A native macOS SQL Server client in the shape of SQL Server Management Studio:
 Object Explorer, a T-SQL editor with IntelliSense, a results grid, execution plans,
 scripting, an editable data grid, activity monitoring, backup/restore, flat-file import,
 Standard Reports, Query Store and the error log viewer — plus **Schema Compare** and
-**Data Compare**, modelled on Redgate SQL Compare and SQL Data Compare, in the app and
-on the command line.
+**Data Compare**, modelled on Redgate SQL Compare and SQL Data Compare, and **SQL Backup**,
+modelled on Redgate SQL Backup Pro, in the app and on the command line.
 
 It talks to SQL Server directly. There is **no ODBC driver, FreeTDS, Docker container
 or JVM to install** — the TDS 7.4 protocol is implemented in Swift inside this repo.
@@ -22,7 +22,7 @@ or JVM to install** — the TDS 7.4 protocol is implemented in Swift inside this
 ├─────────────────────────────────────────────────────────────┤
 │ SQLServerKit   sessions · catalog queries · scripting ·      │
 │                admin · IntelliSense · import/export ·        │
-│                schema and data comparison                    │
+│                schema and data comparison · backup           │
 ├─────────────────────────────────────────────────────────────┤
 │ TDSKit         TDS 7.4 over SwiftNIO + NIOSSL                │
 │                PRELOGIN · TLS · LOGIN7 · token stream        │
@@ -262,6 +262,38 @@ swift build -c release          # libraries and executables
   identity values are kept with IDENTITY_INSERT, and identities can be reseeded
 - Projects (`.dcmp`) and HTML, Excel, XML, CSV and JSON reports
 
+**SQL Backup** (Tools → SQL Backup…, ⌥⌘B, or a database's *SQL Backup* menu)
+- One window per server: every database with its state, recovery model, last full,
+  differential and log backup, and a red mark when it is behind (thresholds are options)
+- Time Line: a row per database with backups in green (taller for full, shorter for
+  differential and log), restores in blue, failures in red, scheduled jobs as hollow
+  blocks, running operations striped, overlapping schedules in pink and *now* in yellow;
+  zoom from an hour to a month, drag to scroll, click a block to open it
+- Activity History, In Progress (with percent done, time left and cancel), Jobs, Log
+  Shipping and Reminders tabs
+- Back Up wizard: full, differential or log; one, several or all user/system databases
+  with exclusions; file names from tags (`<DATABASE>`, `<TYPE>`, `<DATETIME …>`, …),
+  striping over up to 64 files or mirroring to up to three folders, overwrite protection,
+  deleting old backups by age or count, compression levels mapped to each version's
+  algorithms (MS_XPRESS, QAT_DEFLATE, ZSTD), certificate encryption, checksums, retries on
+  network errors, verification and Database Mail notification; Azure Blob and S3 targets
+- Schedule Backup Jobs: the same choices as SQL Server Agent jobs, with a schedule per
+  backup type, editable afterwards from the Jobs tab
+- Restore wizard: from backup history or backup files on the server; it builds the chain
+  (full, differential, logs) by LSN, restores to a point in time, to a new database or over
+  an existing one (killing connections and backing up the tail of the log first), moves
+  the files, leaves the database operational, restoring or read-only, checks for orphaned
+  users, runs DBCC CHECKDB, and can drop the database afterwards
+- Schedule Restore Jobs: restore the latest backup on a schedule, check it and drop it —
+  proof that the backups restore
+- Log shipping to a standby database on the same or another server, initialized from a
+  fresh full backup, with status, removal and bringing the standby online
+- Object Level Recovery: restore a copy of the database and open Schema Compare or Data
+  Compare between the copy and the live database to bring back single objects or rows
+- Compression Analyzer, backup reports (HTML, CSV, JSON), and server options: default
+  file names, backup compression and checksum defaults, history cleanup, Database Mail
+  set-up, backup certificates (create, export with the private key, import elsewhere)
+
 ## Comparing from the command line
 
 `ssms-compare` runs both comparisons without the app — for build pipelines, scheduled
@@ -291,6 +323,34 @@ Passwords come from `--source-password` / `--target-password` or the `SSMS_SOURC
 `SSMS_TARGET_PASSWORD` and `SQL_PASSWORD` environment variables. Projects saved in the app
 run unchanged with `--project`. `ssms-compare help` lists every option.
 
+## Backing up from the command line
+
+`ssms-backup` does the same work without the app — for scripts, cron jobs and servers
+without SQL Server Agent:
+
+```bash
+swift build -c release --product ssms-backup
+
+# Back up every user database, compressed and verified, keeping two weeks of files.
+.build/release/ssms-backup backup --server prod --user-databases \
+    --folder /var/opt/mssql/backup --compression 2 --verify --erase-files 14
+
+# Restore Shop to 10:30 this morning as Shop_Check, check it and drop it again.
+.build/release/ssms-backup restore --server prod --database Shop_Check --source Shop \
+    --stop-at "2026-10-23 10:30:00" --checkdb --drop success
+
+# Schedule log backups every 15 minutes as an Agent job.
+.build/release/ssms-backup jobs --server prod --create-backup --database Shop --type log \
+    --schedule "every 15 minutes"
+
+# Which databases are behind on their backups?
+.build/release/ssms-backup status --server prod
+```
+
+The exit code is 0 on success, 1 when the work finished with warnings and 2 when it
+failed. `--script` prints the T-SQL instead of running it, and `ssms-backup help` lists
+every option.
+
 ## Data fidelity
 
 Values are decoded from the wire, not through an intermediate driver, so they render the
@@ -313,7 +373,7 @@ into mojibake.
 ## Testing
 
 ```bash
-swift run ssms-tests          # 310 offline regression checks, no server needed
+swift run ssms-tests          # about 580 offline regression checks, no server needed
 swift run tdscli all          # service smoke tests against a live server
 ./.build/debug/ssms-mac --selftest   # drives the real UI models end to end
 ```
@@ -355,6 +415,14 @@ docker run -d --platform linux/amd64 --name ssms-mac-test \
   direct source-control links are not data sources (a scripts folder kept in Git is the
   equivalent). Data Compare compares live databases only.
 - Deploying to a snapshot is not possible — save the script and run it instead.
+- SQL Backup writes SQL Server's own backups (`.bak`, `.trn`) through `BACKUP` and
+  `RESTORE`. It cannot read Redgate's `.sqb` files, encrypts with a server certificate
+  rather than a password, and copies backups elsewhere only by mirroring them as they are
+  written (`MIRROR TO`, Enterprise and Developer editions) rather than afterwards.
+- Files are browsed, checked and deleted through SQL Server (`xp_dirtree`,
+  `xp_fileexist`, `xp_delete_file`), so folders are the server's, and SQL Server's service
+  account needs rights on them. Scheduling needs SQL Server Agent; Express has none.
+- Backup history and job times are shown in the server's own clock.
 
 ## Contributing
 
@@ -375,6 +443,7 @@ Sources/
   SSMSMac/         SwiftUI app
   SSMSTests/       offline regression suite
   SSMSCompare/     ssms-compare, the schema and data comparison command line
+  SSMSBackup/      ssms-backup, the backup, restore and verification command line
   TDSCLI/          live service smoke tests
 Scripts/
   install.sh           build from source and install into /Applications
