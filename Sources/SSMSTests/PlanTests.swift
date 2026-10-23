@@ -62,7 +62,9 @@ func runPlanTests(_ t: TestRunner) {
         t.equal(statements.first?.root?.children.count, 1, "one child")
         let child = statements.first?.root?.children.first
         t.equal(child?.physicalOp, "Index Seek", "child operator")
-        t.equal(child?.indexName, "IX_Orders_Date", "index name is picked up")
+        // Showplan writes the index already quoted, and the parser keeps what it is
+        // given rather than inventing a second quoting convention.
+        t.equal(child?.indexName, "[IX_Orders_Date]", "index name is picked up as written")
         t.equal(child?.actualRows, 320, "actual rows come from the runtime counters")
         t.expect(statements.first?.root?.operatorCost ?? 0 > 0,
                  "the root keeps the cost its children do not account for")
