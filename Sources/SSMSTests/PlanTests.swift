@@ -7,6 +7,11 @@ import SQLServerKit
 func runPlanTests(_ t: TestRunner) {
 
     /// A one-statement plan: a join whose inner side is the operator under test.
+    ///
+    /// The shape matters. In real showplan XML a child operator sits inside its
+    /// parent's operator element (`<NestedLoops>`), never directly inside `<RelOp>`,
+    /// and the parser follows that rule — a fixture that nests RelOps directly parses
+    /// as a tree with no children.
     func plan(statementCost: Double,
               outer: String,
               inner: String,
@@ -28,16 +33,18 @@ func runPlanTests(_ t: TestRunner) {
                 <RelOp NodeId="0" PhysicalOp="\(outer)" LogicalOp="Inner Join"
                        EstimateRows="100" EstimateIO="0" EstimateCPU="0.01"
                        EstimatedTotalSubtreeCost="\(statementCost)" AvgRowSize="40">
-                  <RelOp NodeId="1" PhysicalOp="\(inner)" LogicalOp="Index Seek"
-                         EstimateRows="\(innerEstimateRows)" EstimateIO="0.003"
-                         EstimateCPU="0.0002"
-                         EstimatedTotalSubtreeCost="\(innerCost)" AvgRowSize="30">
-                    \(actual)
-                    <IndexScan>
-                      <Object Database="[Shop]" Schema="[dbo]" Table="[Orders]"
-                              Index="[\(innerIndex)]"/>
-                    </IndexScan>
-                  </RelOp>
+                  <NestedLoops Optimized="false">
+                    <RelOp NodeId="1" PhysicalOp="\(inner)" LogicalOp="Index Seek"
+                           EstimateRows="\(innerEstimateRows)" EstimateIO="0.003"
+                           EstimateCPU="0.0002"
+                           EstimatedTotalSubtreeCost="\(innerCost)" AvgRowSize="30">
+                      \(actual)
+                      <IndexScan>
+                        <Object Database="[Shop]" Schema="[dbo]" Table="[Orders]"
+                                Index="[\(innerIndex)]"/>
+                      </IndexScan>
+                    </RelOp>
+                  </NestedLoops>
                 </RelOp>
               </QueryPlan>
             </StmtSimple>
