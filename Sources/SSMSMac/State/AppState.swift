@@ -1,5 +1,8 @@
 import Foundation
+import AppKit
+import Combine
 import SwiftUI
+import UniformTypeIdentifiers
 import TDSKit
 import SQLServerKit
 
@@ -28,8 +31,12 @@ final class ConnectedServer: ObservableObject, Identifiable {
 @MainActor
 final class AppState: ObservableObject {
     @Published private(set) var servers: [ConnectedServer] = []
-    @Published var tabs: [QueryTab] = []
-    @Published var selectedTabID: UUID?
+    @Published var tabs: [QueryTab] = [] {
+        didSet { observeSelectedTab() }
+    }
+    @Published var selectedTabID: UUID? {
+        didSet { observeSelectedTab() }
+    }
 
     @Published var isConnecting = false
     @Published var connectionError: String?
@@ -48,6 +55,7 @@ final class AppState: ObservableObject {
     let history = QueryHistoryStore()
 
     private var untitledCounter = 1
+    private var selectedTabObservers: [AnyCancellable] = []
 
     enum AppSheet: Identifiable {
         case connect
@@ -145,8 +153,29 @@ final class AppState: ObservableObject {
     /// the user's saved connection list.
     func connect(profile: ConnectionProfile, password: String?, accessToken: String? = nil,
                  persist: Bool = true) async {
-        isConnecting = true
         connectionError = nil
+
+        // A saved connection that is already open. A second session would carry the
+        // same id (the session id is the profile id), which gives the Object Explorer
+        // two roots with one identity and breaks the sheets and disconnect keyed by it.
+        // Editing the server or login in the connect dialog gives the profile a new id,
+        // so only a genuine reconnect lands here.
+        if let existing = servers.first(where: { $0.id == profile.id }) {
+            if persist {
+                var saved = profile
+                saved.discoveredServerName = existing.profile.discoveredServerName
+                connections.save(saved, password: password)
+            }
+            if let root = explorer.roots.first(where: { $0.id.hasPrefix(existing.id.uuidString) }) {
+                explorer.selectedID = root.id
+            }
+            statusMessage = "Already connected to \(existing.displayName)."
+            await newQueryTab(server: existing,
+                              database: profile.database.isEmpty ? nil : profile.database)
+            return
+        }
+
+        isConnecting = true
         defer { isConnecting = false }
 
         do {
@@ -204,10 +233,15 @@ final class AppState: ObservableObject {
         if let server {
             await tab.attach(session: server.session, database: database)
         }
-        tab.isDirty = false
+        // Text handed in (a template, a scripted object) is unsaved work; a tab opened
+        // from a file is marked clean by its caller.
+        tab.isDirty = !text.isEmpty
         return tab
     }
 
+    /// Closes `tab` without asking. The interactive paths go through
+    /// `closeTabAskingToSave`; this is what they end in, and what the headless self
+    /// test calls directly.
     func closeTab(_ tab: QueryTab) {
         Task { await tab.disconnect() }
         tabs.removeAll { $0.id == tab.id }
@@ -220,5 +254,182 @@ final class AppState: ObservableObject {
             tab.title = title
             tab.isDirty = false
         }
+    }
+
+    /// Query Options ▸ Results describes how every window renders text output.
+    func applyResultsPreferences(_ preferences: QueryResultsPreferences) {
+        for tab in tabs { tab.textResultPreferences = preferences }
+    }
+
+    /// The Query menu's enabled states come from the selected tab, but a `Commands`
+    /// body only re-evaluates when this object publishes. The tab state the menu reads
+    /// is forwarded; `text` and `selectedRange` deliberately are not, since re-rendering
+    /// the window on every keystroke is exactly what that would cost.
+    private func observeSelectedTab() {
+        selectedTabObservers.removeAll()
+        guard let tab = selectedTab else { return }
+        func forward<Value>(_ publisher: Published<Value>.Publisher) {
+            publisher.dropFirst()
+                .sink { [weak self] _ in self?.objectWillChange.send() }
+                .store(in: &selectedTabObservers)
+        }
+        forward(tab.$isExecuting)
+        forward(tab.$isConnecting)
+        forward(tab.$sessionID)
+        forward(tab.$executionPlanXML)
+        forward(tab.$resultSets)
+    }
+
+    // MARK: - Closing tabs with unsaved changes
+
+    private enum SaveChoice { case save, discard, cancel }
+
+    /// Closes `tab`, first asking what to do with unsaved changes. Returns false when
+    /// the user cancelled or the save failed.
+    @discardableResult
+    func closeTabAskingToSave(_ tab: QueryTab) -> Bool {
+        guard settleUnsavedChanges(in: tab) else { return false }
+        closeTab(tab)
+        return true
+    }
+
+    /// Closes every tab but `kept`, stopping at the first Cancel.
+    func closeOtherTabs(keeping kept: QueryTab) {
+        for tab in tabs where tab.id != kept.id {
+            guard closeTabAskingToSave(tab) else { return }
+        }
+    }
+
+    /// Asks about every tab with unsaved changes before the app quits. Returns false
+    /// when the user cancelled.
+    func prepareToTerminate() -> Bool {
+        for tab in tabs where tab.isDirty {
+            guard settleUnsavedChanges(in: tab) else { return false }
+        }
+        return true
+    }
+
+    /// Save / Don't Save / Cancel for a dirty tab; true means closing may go ahead.
+    private func settleUnsavedChanges(in tab: QueryTab) -> Bool {
+        guard tab.isDirty else { return true }
+        // Show the tab being asked about, so the question has something to refer to.
+        selectedTabID = tab.id
+        switch askToSaveChanges(in: tab) {
+        case .save: return saveScript(tab, as: false)
+        case .discard: return true
+        case .cancel: return false
+        }
+    }
+
+    private func askToSaveChanges(in tab: QueryTab) -> SaveChoice {
+        let name = tab.fileURL?.lastPathComponent ?? tab.title
+        let alert = NSAlert()
+        alert.messageText = "Do you want to save the changes made to “\(name)”?"
+        alert.informativeText = "Your changes will be lost if you don’t save them."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Don’t Save")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: return .save
+        case .alertThirdButtonReturn: return .discard
+        default: return .cancel
+        }
+    }
+
+    // MARK: - Script files
+
+    /// The types the open and save panels accept. `.sql` has no system-wide type: until
+    /// the bundle's exported declaration is registered it resolves to a dynamic type
+    /// that does not conform to plain text, which greyed .sql files out. Listing the
+    /// extension itself keeps them selectable from a plain `swift run` as well.
+    static let scriptContentTypes: [UTType] = {
+        var types: [UTType] = [UTType(exportedAs: "dev.ssmsmac.sql", conformingTo: .plainText)]
+        if let byExtension = UTType(filenameExtension: "sql") { types.append(byExtension) }
+        types.append(contentsOf: [.plainText, .text])
+        var seen = Set<String>()
+        return types.filter { seen.insert($0.identifier).inserted }
+    }()
+
+    /// File ▸ Open Script: a new tab on the current tab's server and database.
+    func openScriptPanel() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = AppState.scriptContentTypes
+        panel.allowsOtherFileTypes = true
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        let text: String
+        do {
+            text = try AppState.readScript(at: url)
+        } catch {
+            presentError("The script could not be opened.",
+                         detail: "\(url.lastPathComponent): \(error.localizedDescription)")
+            return
+        }
+        let server = servers.first { $0.id == selectedTab?.sessionID } ?? servers.first
+        let database = selectedTab?.database
+        Task {
+            let tab = await newQueryTab(server: server, database: database, text: text)
+            tab.fileURL = url
+            tab.title = url.lastPathComponent
+            tab.isDirty = false
+        }
+    }
+
+    /// SSMS wrote UTF-16 for years and plenty of scripts are Windows-1252; a UTF-8
+    /// read alone fails on both. The byte order mark and the file's own encoding
+    /// attribute are tried first, then UTF-8, then Windows-1252.
+    static func readScript(at url: URL) throws -> String {
+        var encoding = String.Encoding.utf8
+        if let detected = try? String(contentsOf: url, usedEncoding: &encoding) { return detected }
+        let data = try Data(contentsOf: url)
+        if let utf8 = String(data: data, encoding: .utf8) { return utf8 }
+        if let windows = String(data: data, encoding: .windowsCP1252) { return windows }
+        throw CocoaError(.fileReadInapplicableStringEncoding)
+    }
+
+    /// File ▸ Save Script. Returns true once the file is on disk; the tab is only
+    /// marked clean then.
+    @discardableResult
+    func saveScript(_ tab: QueryTab, as saveAs: Bool) -> Bool {
+        var target = tab.fileURL
+        if target == nil || saveAs {
+            let panel = NSSavePanel()
+            panel.allowedContentTypes = AppState.scriptContentTypes
+            panel.allowsOtherFileTypes = true
+            panel.canCreateDirectories = true
+            if let existing = tab.fileURL {
+                panel.directoryURL = existing.deletingLastPathComponent()
+                panel.nameFieldStringValue = existing.lastPathComponent
+            } else {
+                panel.nameFieldStringValue = tab.title.lowercased().hasSuffix(".sql")
+                    ? tab.title : tab.title + ".sql"
+            }
+            guard panel.runModal() == .OK, let chosen = panel.url else { return false }
+            target = chosen
+        }
+        guard let url = target else { return false }
+
+        do {
+            try tab.text.write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            presentError("The script could not be saved.",
+                         detail: "\(url.lastPathComponent): \(error.localizedDescription)")
+            return false
+        }
+        tab.fileURL = url
+        tab.title = url.lastPathComponent
+        tab.isDirty = false
+        statusMessage = "Saved \(url.lastPathComponent)."
+        return true
+    }
+
+    private func presentError(_ message: String, detail: String) {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.informativeText = detail
+        alert.alertStyle = .warning
+        alert.runModal()
     }
 }

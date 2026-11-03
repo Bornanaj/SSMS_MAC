@@ -172,7 +172,7 @@ public struct ServerReports: Sendable {
 
     // MARK: - The SQL behind each report
 
-    static func sql(for kind: ServerReportKind, info: ServerInfo) -> String {
+    public static func sql(for kind: ServerReportKind, info: ServerInfo) -> String {
         switch kind {
         case .serverDashboard:
             return """
@@ -444,12 +444,13 @@ public struct ServerReports: Sendable {
         """
     }
 
-    /// The default trace is the only free source for growth and DDL history.
+    /// The default trace is the only free source for growth and DDL history. Its folder is
+    /// cut at the last separator, which is a backslash on Windows and a slash on Linux.
     private static func defaultTrace(eventClasses: String, label: String) -> String {
         """
         DECLARE @path nvarchar(260);
         SELECT @path = REVERSE(SUBSTRING(REVERSE(path),
-                                         CHARINDEX(N'\\', REVERSE(path)), 260)) + N'log.trc'
+                                         PATINDEX(N'%[\\/]%', REVERSE(path)), 260)) + N'log.trc'
         FROM sys.traces WHERE is_default = 1;
 
         IF @path IS NULL

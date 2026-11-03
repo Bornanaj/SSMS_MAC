@@ -94,7 +94,7 @@ public struct BackupSchedule: Codable, Hashable, Sendable, Identifiable {
     public init(id: UUID = UUID(), name: String = "", isEnabled: Bool = true, frequency: Frequency = .daily,
                 interval: Int = 1, weekdays: Int = 62, dayOfMonth: Int = 1, relativeOrdinal: Int = 1,
                 relativeDay: Int = 1, repeats: Bool = false, repeatInterval: Int = 1, repeatUnit: RepeatUnit = .hours,
-                startTime: Int = 0, endTime: Int = 86_399, startDate: Date = Date(), endDate: Date? = nil) {
+                startTime: Int = 0, endTime: Int = 86_399, startDate: Date, endDate: Date? = nil) {
         self.id = id
         self.name = name
         self.isEnabled = isEnabled
@@ -114,8 +114,8 @@ public struct BackupSchedule: Codable, Hashable, Sendable, Identifiable {
     }
 
     /// The schedules SQL Backup's worked example uses: full daily at midnight, differential daily
-    /// at noon, log every hour.
-    public static func suggested(for type: BackupType, today: Date = Date()) -> BackupSchedule {
+    /// at noon, log every hour. `today` is the server's date (see `ServerTime`), not the Mac's.
+    public static func suggested(for type: BackupType, today: Date) -> BackupSchedule {
         switch type {
         case .full:
             return BackupSchedule(name: "Daily at 00:00", frequency: .daily, startTime: 0, startDate: today)
@@ -131,8 +131,8 @@ public struct BackupSchedule: Codable, Hashable, Sendable, Identifiable {
 
     /// Parses the command line's schedule text: `daily 00:00`, `daily every 15 minutes`,
     /// `every 2 hours`, `weekly mon,wed,fri 01:30`, `monthly 1 02:00`, `once 2026-11-01 03:00`,
-    /// `agent-start` and `cpu-idle`. Times are the server's.
-    public static func parse(_ text: String, today: Date = Date()) -> BackupSchedule? {
+    /// `agent-start` and `cpu-idle`. Times are the server's, and so is `today`.
+    public static func parse(_ text: String, today: Date) -> BackupSchedule? {
         let words: [String] = text.lowercased().split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
         guard let first = words.first else { return nil }
         func time(_ word: String?) -> Int? {

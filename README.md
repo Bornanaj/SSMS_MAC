@@ -321,7 +321,15 @@ swift build -c release --product ssms-compare
 
 Passwords come from `--source-password` / `--target-password` or the `SSMS_SOURCE_PASSWORD`,
 `SSMS_TARGET_PASSWORD` and `SQL_PASSWORD` environment variables. Projects saved in the app
-run unchanged with `--project`. `ssms-compare help` lists every option.
+run unchanged with `--project`, including the objects you unticked. `ssms-compare help`
+lists every option.
+
+Two safety rules guard pipelines: a scripts folder or snapshot path that does not exist is
+an error (exit 64), and a source with no objects at all is never scripted or deployed
+onto a populated target unless `--allow-empty-source` says so — a mistyped path must not
+turn into a script that drops everything. A data comparison in which any table could not
+be read (a bad `--where`, a missing key, a permission) exits 1 rather than reporting the
+rest as identical. Misspelled options are rejected (exit 64) instead of being ignored.
 
 ## Backing up from the command line
 
@@ -348,8 +356,11 @@ swift build -c release --product ssms-backup
 ```
 
 The exit code is 0 on success, 1 when the work finished with warnings and 2 when it
-failed. `--script` prints the T-SQL instead of running it, and `ssms-backup help` lists
-every option.
+failed. `--script` prints the T-SQL the run would execute — including the folder
+creation, the overwrite guard and the retention deletes — instead of running it, and
+`ssms-backup help` lists every option. Switches such as `--replace`, `--quiet` and
+`--checkdb` never swallow the file name that follows them; a standby restore takes its
+undo file through `--undo-file`.
 
 ## Data fidelity
 

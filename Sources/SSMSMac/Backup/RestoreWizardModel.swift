@@ -39,7 +39,25 @@ final class RestoreWizardModel: ObservableObject {
     @Published private(set) var chainError: String?
     @Published private(set) var fileList: [RestoreFileInfo] = []
     @Published var options = RestoreOptions()
-    @Published var createNew = true
+    @Published var createNew = true {
+        didSet {
+            guard createNew != oldValue else { return }
+            if createNew {
+                // A name that already exists would be refused; offer a fresh one.
+                if options.destinationDatabase.isEmpty || destinationExists {
+                    options.destinationDatabase = sourceDatabase.isEmpty ? "" : "\(sourceDatabase)_Restored"
+                }
+            } else if !destinationExists {
+                // The picker lists existing databases only. Restoring over the source is
+                // the usual case; otherwise leave the choice open rather than letting a
+                // name that is not in the list through, which would quietly create a new
+                // database instead of overwriting one.
+                options.destinationDatabase = databases.first {
+                    $0.name.caseInsensitiveCompare(sourceDatabase) == .orderedSame
+                }?.name ?? ""
+            }
+        }
+    }
     @Published private(set) var isLoading = false
 
     @Published private(set) var isRunning = false
@@ -48,11 +66,16 @@ final class RestoreWizardModel: ObservableObject {
     @Published private(set) var outcome: RestoreOutcome?
     @Published var errorText: String?
 
+    /// The server's clock now, not the clock read once at connect: a second tail-log
+    /// backup in the same window must not get the first one's file name.
+    private let serverNow: () -> Date
+
     init(window: BackupWindowModel, session: SQLServerSession, capabilities: BackupServerCapabilities, database: String?) {
         self.session = session
         self.capabilities = capabilities
         self.serverName = window.serverName
         self.databases = window.databases
+        self.serverNow = { [weak window] in window?.serverNow ?? capabilities.serverTime ?? Date() }
         sourceDatabase = database ?? ""
         options.destinationDatabase = database.map { "\($0)_Restored" } ?? ""
     }
@@ -182,7 +205,7 @@ final class RestoreWizardModel: ObservableObject {
 
     func suggestTailPath() {
         guard options.tailLogPath.isEmpty else { return }
-        let stamp = ServerTime.format(capabilities.serverTime ?? Date(), "yyyyMMdd_HHmmss")
+        let stamp = ServerTime.format(serverNow(), "yyyyMMdd_HHmmss")
         options.tailLogPath = capabilities.join(capabilities.backupFolder,
                                                 "LOG_\(capabilities.instanceTag)_\(options.destinationDatabase)_\(stamp)_tail.trn")
     }
@@ -214,6 +237,11 @@ final class RestoreWizardModel: ObservableObject {
             }
             if createNew && destinationExists {
                 errors.append("\(options.destinationDatabase) already exists. Choose to overwrite it instead.")
+            }
+            if !createNew && !destinationExists
+                && !options.destinationDatabase.trimmingCharacters(in: .whitespaces).isEmpty {
+                errors.append("\(options.destinationDatabase) does not exist on \(serverName). "
+                              + "Choose the database to overwrite, or create a new one.")
             }
             if let planner {
                 errors += planner.validationErrors().filter { !$0.contains("Enter the name") }

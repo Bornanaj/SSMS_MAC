@@ -15,6 +15,10 @@ echo "==> editor rendering check"
 
 HOST="${SQL_HOST:-127.0.0.1}"
 PORT="${SQL_PORT:-11433}"
+# tdscli and the self test fall back to the README's container credentials on their
+# own; the compare tools only read the environment, so give them the same defaults.
+export SQL_USER="${SQL_USER:-sa}"
+export SQL_PASSWORD="${SQL_PASSWORD:-Str0ngP@ssw0rd!}"
 if ! nc -z -G 2 "$HOST" "$PORT" 2>/dev/null; then
     echo "==> no server on $HOST:$PORT, skipping the live suites"
     exit 0

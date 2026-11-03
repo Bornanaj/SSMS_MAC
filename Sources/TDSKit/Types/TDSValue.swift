@@ -106,7 +106,19 @@ public struct TDSTemporal: Sendable, Hashable {
     }
 
     /// Literal that can be pasted back into a T-SQL script.
-    public var sqlLiteral: String { "'" + displayString + "'" }
+    ///
+    /// `datetime` and `smalldatetime` take the ISO 8601 form with a `T`: with a space,
+    /// SQL Server reads the date part under the login's DATEFORMAT, so `2024-03-04`
+    /// is the 3rd of April for a British or German login. `date`, `datetime2` and
+    /// `datetimeoffset` are language-neutral in either form.
+    public var sqlLiteral: String {
+        switch kind {
+        case .dateTime, .smallDateTime:
+            return "'" + displayString.replacingOccurrences(of: " ", with: "T") + "'"
+        default:
+            return "'" + displayString + "'"
+        }
+    }
 
     /// Best-effort bridge to Foundation for sorting and charting.
     public var foundationDate: Date? {

@@ -143,10 +143,14 @@ final class TDSConnectionHandler: ChannelDuplexHandler {
     private var closed = false
     private var closeReason: String = "the server closed the connection"
 
-    /// Set when the caller sent an ATTENTION packet so the response can be reported as cancelled.
-    var attentionSent = false
     /// Updated when the server announces a different packet size.
     var onPacketSizeChange: ((Int) -> Void)?
+    /// How many bytes the accumulator must hold before a parse that came up short is
+    /// tried again. A token split across packets is re-parsed from its start whenever
+    /// more arrives, which copied a 16 MB value once per 4 KB packet; waiting until
+    /// the buffer has doubled keeps the total work linear. The end of the message
+    /// always parses, so nothing waits for data it does not need.
+    private var retryThreshold = 0
 
     init(allocator: ByteBufferAllocator) {
         self.accumulator = allocator.buffer(capacity: 16 * 1024)
@@ -168,6 +172,7 @@ final class TDSConnectionHandler: ChannelDuplexHandler {
     func beginTokens(sink: @escaping (TDSStreamEvent) -> Void, promise: EventLoopPromise<Void>) {
         parser.reset()
         accumulator.clear()
+        retryThreshold = 0
         pending = .tokens(sink: sink, promise: promise)
     }
 
@@ -189,6 +194,7 @@ final class TDSConnectionHandler: ChannelDuplexHandler {
 
         case .tokens(let sink, let promise):
             accumulator.writeBuffer(&packet.payload)
+            if !packet.isEndOfMessage && accumulator.readableBytes < retryThreshold { return }
             do {
                 try parser.parse(&accumulator) { token in
                     switch token {
@@ -212,6 +218,9 @@ final class TDSConnectionHandler: ChannelDuplexHandler {
                     case .tableName, .sessionState: break
                     }
                 }
+                // Whatever is left is the front of a token that is not complete yet.
+                let leftover = accumulator.readableBytes
+                retryThreshold = leftover > 0 ? leftover * 2 : 0
                 accumulator.discardReadBytes()
             } catch {
                 pending = nil
@@ -238,7 +247,7 @@ final class TDSConnectionHandler: ChannelDuplexHandler {
         context.fireChannelInactive()
     }
 
-    private func failPending(_ error: Error) {
+    func failPending(_ error: Error) {
         guard let current = pending else { return }
         pending = nil
         switch current {

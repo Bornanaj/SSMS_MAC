@@ -299,6 +299,27 @@ struct ScriptPreviewSheet: View {
     @Environment(\.dismiss) private var dismiss
     let title: String
     let sql: String
+    /// The server and database the script was generated for. A caller that cannot
+    /// say gets the selected query tab's server, which is where the user is working,
+    /// rather than whichever server happened to connect first.
+    var server: ConnectedServer? = nil
+    var database: String? = nil
+
+    private var targetServer: ConnectedServer? {
+        if let server { return server }
+        if let sessionID = app.selectedTab?.sessionID, let current = app.server(id: sessionID) {
+            return current
+        }
+        return app.servers.first
+    }
+
+    private var targetDatabase: String? {
+        if let database { return database }
+        guard server == nil, let current = app.selectedTab?.database, !current.isEmpty else {
+            return nil
+        }
+        return current
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -322,7 +343,7 @@ struct ScriptPreviewSheet: View {
                     NSPasteboard.general.setString(sql, forType: .string)
                 }
                 Button("Open in New Query Window") {
-                    app.openScript(sql, server: app.servers.first, database: nil, title: title)
+                    app.openScript(sql, server: targetServer, database: targetDatabase, title: title)
                     dismiss()
                 }
                 Spacer()

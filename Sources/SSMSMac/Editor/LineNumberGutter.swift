@@ -15,8 +15,14 @@ final class LineNumberGutterView: NSView {
         didSet { needsDisplay = true }
     }
     var font: NSFont = .monospacedSystemFont(ofSize: 11, weight: .regular) {
-        didSet { needsDisplay = true }
+        didSet {
+            boldFont = NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask)
+            needsDisplay = true
+        }
     }
+    /// Error lines are drawn bold; derived once per font rather than on every draw.
+    private var boldFont: NSFont = NSFontManager.shared.convert(
+        .monospacedSystemFont(ofSize: 11, weight: .regular), toHaveTrait: .boldFontMask)
     /// 1-based lines the server reported errors on.
     var errorLines: Set<Int> = [] {
         didSet { needsDisplay = true }
@@ -30,12 +36,7 @@ final class LineNumberGutterView: NSView {
 
     private var lineCount: Int {
         guard let text = textView?.string as NSString? else { return 1 }
-        var count = 1
-        text.enumerateSubstrings(in: NSRange(location: 0, length: text.length),
-                                 options: [.byLines, .substringNotRequired]) { _, _, _, _ in
-            count += 1
-        }
-        return max(1, count - (text.hasSuffix("\n") ? 0 : 1) + (text.hasSuffix("\n") ? 0 : 0))
+        return TextLines.count(in: text)
     }
 
     /// Wide enough for the highest line number plus padding, snapped so the width
@@ -83,7 +84,7 @@ final class LineNumberGutterView: NSView {
             .foregroundColor: palette.lineNumber
         ]
         let errorAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask),
+            .font: boldFont,
             .foregroundColor: NSColor.systemRed
         ]
 

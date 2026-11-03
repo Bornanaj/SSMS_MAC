@@ -298,7 +298,8 @@ struct DataCompareWindow: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             DataRowsGrid(table: table, status: model.rowStatus, onlyDifferingColumns: model.onlyDifferingColumns,
-                         version: model.rowVersion, font: settings.gridFont, nullText: settings.gridNullText) { rowID, value in
+                         comparedAt: model.comparison?.comparedAt ?? .distantPast, version: model.rowVersion,
+                         font: settings.gridFont, nullText: settings.gridNullText) { rowID, value in
                 model.setRowSelected(tableID: table.id, rowID: rowID, value)
             }
         }

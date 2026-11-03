@@ -1,6 +1,7 @@
 import AppKit
 import SQLServerKit
 
+@MainActor
 protocol SQLTextViewDelegate: AnyObject {
     func sqlTextViewDidRequestExecute(_ textView: SQLTextView)
     func sqlTextViewDidRequestExecuteSelection(_ textView: SQLTextView)
@@ -27,11 +28,20 @@ final class SQLTextView: NSTextView {
     private var pendingCompletionForce: Bool?
     let completionPanel = CompletionPanelController()
 
-    /// 1-based lines the user has bookmarked, mirrored into the gutter.
+    /// 1-based lines the user has bookmarked, mirrored into the gutter and the tab.
     var bookmarks: Set<Int> = [] {
         didSet { onBookmarksChanged?(bookmarks) }
     }
     var onBookmarksChanged: ((Set<Int>) -> Void)?
+
+    /// The appearance and font last applied by a coordinator. The view outlives the
+    /// SwiftUI wrapper that shows it, so a new wrapper reads this instead of
+    /// re-colouring the whole document on every tab switch.
+    struct AppliedTheme: Equatable {
+        var isDark: Bool
+        var font: NSFont
+    }
+    var appliedTheme: AppliedTheme?
 
     /// Raised when the view lands in a window or the system switches light/dark, so
     /// the coordinator can re-resolve the palette against a real appearance.
@@ -308,40 +318,16 @@ final class SQLTextView: NSTextView {
 
     /// 1-based line containing the caret.
     var currentLine: Int {
-        let text = string as NSString
-        let caret = min(selectedRange().location, text.length)
-        var line = 1
-        text.enumerateSubstrings(in: NSRange(location: 0, length: caret),
-                                 options: [.byLines, .substringNotRequired]) { _, _, _, _ in
-            line += 1
-        }
-        return line
+        TextLines.line(at: selectedRange().location, in: string as NSString)
     }
 
     var lineCount: Int {
-        let text = string as NSString
-        var count = 0
-        text.enumerateSubstrings(in: NSRange(location: 0, length: text.length),
-                                 options: [.byLines, .substringNotRequired]) { _, _, _, _ in
-            count += 1
-        }
-        return max(1, count)
+        TextLines.count(in: string as NSString)
     }
 
     /// Character range of a 1-based line.
     func range(ofLine line: Int) -> NSRange? {
-        let text = string as NSString
-        guard line >= 1 else { return nil }
-        var current = 1
-        var offset = 0
-        while current < line {
-            guard offset < text.length else { return nil }
-            let lineRange = text.lineRange(for: NSRange(location: offset, length: 0))
-            offset = NSMaxRange(lineRange)
-            current += 1
-        }
-        guard offset <= text.length else { return nil }
-        return text.lineRange(for: NSRange(location: min(offset, text.length), length: 0))
+        TextLines.range(ofLine: line, in: string as NSString)
     }
 
     @objc func goToLine(_ line: Int) {
@@ -498,5 +484,58 @@ final class SQLTextView: NSTextView {
         super.setSelectedRanges(ranges, affinity: affinity, stillSelecting: stillSelecting)
         needsDisplay = true
         sqlDelegate?.sqlTextViewDidChangeCaret(self)
+    }
+}
+
+/// Line arithmetic shared by the editor, the gutter, the status bar and the tab.
+///
+/// Counting lines with `enumerateSubstrings(.byLines)` over `0..<caret` counts the
+/// partial line the caret sits on, so the status bar said "Ln 2" on the first line and
+/// bookmarks landed one line too far. Lines are counted by the breaks before an
+/// offset instead, with the same terminator set `lineRange(for:)` uses.
+enum TextLines {
+    /// 1-based line containing the UTF-16 `offset`.
+    static func line(at offset: Int, in text: NSString) -> Int {
+        let end = min(max(0, offset), text.length)
+        guard end > 0 else { return 1 }
+        var line = 1
+        var buffer = [unichar](repeating: 0, count: end)
+        text.getCharacters(&buffer, range: NSRange(location: 0, length: end))
+        var index = 0
+        while index < end {
+            switch buffer[index] {
+            case 0x0A, 0x85, 0x2028, 0x2029:
+                line += 1
+            case 0x0D:
+                // "\r\n" is one break; the "\n" half is counted when it is reached, and a
+                // "\r" directly before the offset only counts when no "\n" follows it.
+                if index + 1 < end, buffer[index + 1] == 0x0A { break }
+                if index + 1 == end, end < text.length, text.character(at: end) == 0x0A { break }
+                line += 1
+            default:
+                break
+            }
+            index += 1
+        }
+        return line
+    }
+
+    /// Number of lines; a trailing line break starts an empty last line, as the editor
+    /// shows it. Never less than 1.
+    static func count(in text: NSString) -> Int {
+        line(at: text.length, in: text)
+    }
+
+    /// Character range of a 1-based line including its terminator, or nil past the end.
+    static func range(ofLine line: Int, in text: NSString) -> NSRange? {
+        guard line >= 1, line <= count(in: text) else { return nil }
+        var current = 1
+        var offset = 0
+        while current < line {
+            guard offset < text.length else { return nil }
+            offset = NSMaxRange(text.lineRange(for: NSRange(location: offset, length: 0)))
+            current += 1
+        }
+        return text.lineRange(for: NSRange(location: offset, length: 0))
     }
 }

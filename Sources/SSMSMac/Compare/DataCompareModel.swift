@@ -106,8 +106,12 @@ final class DataCompareModel: ObservableObject {
 
     // MARK: - Mapping
 
-    func loadMappings(app: AppState) async {
-        guard source.isComplete, target.isComplete else { return }
+    /// Reads both catalogs and pairs the tables. Returns false when that failed, so a compare
+    /// that needs the mappings can stop; `statusIsError` alone cannot say this, because a
+    /// failed save, export or earlier compare sets it too.
+    @discardableResult
+    func loadMappings(app: AppState) async -> Bool {
+        guard source.isComplete, target.isComplete else { return false }
         isBusy = true
         statusIsError = false
         progressText = "Reading tables"
@@ -136,9 +140,11 @@ final class DataCompareModel: ObservableObject {
             if !unmatchedSource.isEmpty { parts.append("\(unmatchedSource.count) only in source") }
             if !unmatchedTarget.isEmpty { parts.append("\(unmatchedTarget.count) only in target") }
             statusText = parts.joined(separator: ", ")
+            return true
         } catch {
             statusText = String(describing: error)
             statusIsError = true
+            return false
         }
     }
 
@@ -232,10 +238,15 @@ final class DataCompareModel: ObservableObject {
 
     func compare(app: AppState) async {
         guard canCompare else { return }
+        // An earlier failure (a compare, a save, an export) must not stop this one.
+        statusIsError = false
         if mappings.isEmpty || mappedFor != endpointsSignature {
-            await loadMappings(app: app)
+            guard await loadMappings(app: app) else { return }
         }
-        guard !statusIsError, !mappings.isEmpty else { return }
+        guard !mappings.isEmpty else {
+            report("No tables could be paired between the source and the target, so there is nothing to compare.")
+            return
+        }
         isBusy = true
         progress = 0
         defer { isBusy = false }

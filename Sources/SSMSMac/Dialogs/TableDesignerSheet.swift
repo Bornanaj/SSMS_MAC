@@ -4,6 +4,7 @@ import SQLServerKit
 /// The equivalent of SSMS "Design": edit a table's columns and apply the changes as
 /// ALTER statements, with the script shown before anything runs.
 struct TableDesignerSheet: View {
+    @EnvironmentObject var app: AppState
     @Environment(\.dismiss) private var dismiss
 
     let server: ConnectedServer
@@ -418,6 +419,9 @@ struct TableDesignerSheet: View {
                 errorText = nil
                 statusText = "\(count) change\(count == 1 ? "" : "s") applied."
                 await load(force: true)
+                // The tree lists columns from its own cache, so it has to be told.
+                await app.explorer.refreshTable(sessionID: server.id, database: database,
+                                                schema: schema, table: table)
             } catch {
                 errorText = String(describing: error)
                 statusText = errorText

@@ -93,6 +93,10 @@ extension ScriptGenerator {
         let sql = """
         SELECT
             t.name                                        AS TypeName,
+            ISNULL(ts.name, N'')                          AS TypeSchema,
+            CAST(t.is_user_defined AS int)                AS IsUserDefined,
+            CAST(s.precision AS int)                      AS TypePrecision,
+            CAST(s.scale AS int)                          AS TypeScale,
             CONVERT(nvarchar(64), s.start_value)          AS StartValue,
             CONVERT(nvarchar(64), s.increment)            AS IncrementValue,
             CONVERT(nvarchar(64), s.minimum_value)        AS MinimumValue,
@@ -103,18 +107,28 @@ extension ScriptGenerator {
         FROM sys.sequences AS s
         JOIN sys.schemas AS sc ON sc.schema_id = s.schema_id
         JOIN sys.types AS t ON t.user_type_id = s.user_type_id
+        LEFT JOIN sys.schemas AS ts ON ts.schema_id = t.schema_id
         WHERE sc.name = \(SQLIdentifier.literal(schema)) AND s.name = \(SQLIdentifier.literal(name));
         """
         guard let row = try await rows(sql, database: database).first else {
             throw SQLServerError.objectNotFound("\(schema).\(name)")
         }
+        // A decimal/numeric sequence keeps its precision; `AS [decimal]` alone would
+        // re-create it as decimal(18,0).
+        let typeName = ScriptGenerator.formatType(name: row.string("TypeName"),
+                                                  schema: row.string("TypeSchema"),
+                                                  baseName: row.string("TypeName"),
+                                                  maxLength: 0,
+                                                  precision: row.int("TypePrecision"),
+                                                  scale: row.int("TypeScale"),
+                                                  isUserDefined: row.bool("IsUserDefined"))
 
         var out = descriptiveHeader(kind: "Sequence", target: target, options: options)
         if action == .dropAndCreate || options.includeDropIfExists {
             out += "DROP SEQUENCE IF EXISTS \(target);\nGO\n"
         }
         out += "CREATE SEQUENCE \(target)\n"
-        out += "    AS \(SQLIdentifier.quote(row.string("TypeName")))\n"
+        out += "    AS \(typeName)\n"
         out += "    START WITH \(row.string("StartValue", default: "1"))\n"
         out += "    INCREMENT BY \(row.string("IncrementValue", default: "1"))\n"
         out += "    MINVALUE \(row.string("MinimumValue", default: "1"))\n"
@@ -176,11 +190,14 @@ extension ScriptGenerator {
             return "DROP TYPE IF EXISTS \(target);\nGO\n"
         }
 
+        // CLR types have no sys.types row for their system_type_id, so the base type is a
+        // LEFT JOIN that falls back to the type's own name rather than dropping the column.
         let columnSQL = """
         SELECT
             c.name                                        AS ColumnName,
             t.name                                        AS TypeName,
-            base.name                                     AS BaseTypeName,
+            ISNULL(base.name, t.name)                     AS BaseTypeName,
+            ISNULL(ts.name, N'')                          AS TypeSchema,
             CAST(t.is_user_defined AS int)                AS IsUserDefined,
             CAST(c.max_length AS int)                     AS MaxLength,
             CAST(c.precision AS int)                      AS TypePrecision,
@@ -193,7 +210,9 @@ extension ScriptGenerator {
         JOIN sys.schemas AS sc ON sc.schema_id = tt.schema_id
         JOIN sys.columns AS c ON c.object_id = tt.type_table_object_id
         JOIN sys.types AS t ON t.user_type_id = c.user_type_id
-        JOIN sys.types AS base ON base.user_type_id = t.system_type_id
+        LEFT JOIN sys.types AS base ON base.user_type_id = t.system_type_id
+             AND base.is_user_defined = 0
+        LEFT JOIN sys.schemas AS ts ON ts.schema_id = t.schema_id
         LEFT JOIN sys.default_constraints AS dc ON dc.parent_object_id = c.object_id
              AND dc.parent_column_id = c.column_id
         WHERE sc.name = \(SQLIdentifier.literal(schema)) AND tt.name = \(SQLIdentifier.literal(name))
@@ -225,7 +244,7 @@ extension ScriptGenerator {
           AND i.index_id > 0
         ORDER BY i.index_id;
         """
-        let keyRows = (try? await rows(keySQL, database: database)) ?? []
+        let keyRows = try await rows(keySQL, database: database)
 
         var out = descriptiveHeader(kind: "UserDefinedTableType", target: target, options: options)
         if action == .dropAndCreate || options.includeDropIfExists {
@@ -235,6 +254,7 @@ extension ScriptGenerator {
 
         var lines: [String] = columnRows.map { row in
             let typeName = ScriptGenerator.formatType(name: row.string("TypeName"),
+                                                      schema: row.string("TypeSchema"),
                                                       baseName: row.string("BaseTypeName"),
                                                       maxLength: row.int("MaxLength"),
                                                       precision: row.int("TypePrecision"),
@@ -242,7 +262,8 @@ extension ScriptGenerator {
                                                       isUserDefined: row.bool("IsUserDefined"))
             var text = "\t\(SQLIdentifier.quote(row.string("ColumnName"))) \(typeName)"
             let collation = row.string("CollationName")
-            if options.scriptCollation, !collation.isEmpty {
+            // An alias type carries its own collation; COLLATE on such a column is Msg 452.
+            if options.scriptCollation, !collation.isEmpty, !row.bool("IsUserDefined") {
                 text += " COLLATE \(collation)"
             }
             if row.bool("IsIdentity") { text += " IDENTITY(1,1)" }
@@ -301,32 +322,64 @@ extension ScriptGenerator {
             ISNULL(dp.type_desc, N'')                     AS TypeDesc,
             ISNULL(dp.default_schema_name, N'')           AS DefaultSchema,
             ISNULL(dp.authentication_type_desc, N'')      AS AuthenticationType,
-            ISNULL(SUSER_SNAME(dp.sid), N'')              AS LoginName
+            ISNULL(SUSER_SNAME(dp.sid), N'')              AS LoginName,
+            ISNULL((SELECT TOP (1) c.name FROM sys.certificates AS c
+                    WHERE c.sid = dp.sid), N'')           AS CertificateName,
+            ISNULL((SELECT TOP (1) k.name FROM sys.asymmetric_keys AS k
+                    WHERE k.sid = dp.sid), N'')           AS AsymmetricKeyName
         FROM sys.database_principals AS dp
         WHERE dp.name = \(SQLIdentifier.literal(name));
         """
         guard let row = try await rows(sql, database: database).first else {
             throw SQLServerError.objectNotFound(name)
         }
-        let login = row.string("LoginName")
-        let authentication = row.string("AuthenticationType").uppercased()
+        return Self.createUserStatement(
+            name: name,
+            typeDesc: row.string("TypeDesc"),
+            authenticationType: row.string("AuthenticationType"),
+            login: row.string("LoginName"),
+            defaultSchema: row.string("DefaultSchema"),
+            certificate: row.string("CertificateName"),
+            asymmetricKey: row.string("AsymmetricKeyName"))
+    }
 
-        var clauses: [String] = []
-        switch authentication {
-        case "NONE":
-            // A user without a login: WITHOUT LOGIN, which is how contained-schema owners
-            // and impersonation-only users are created.
-            clauses.append("WITHOUT LOGIN")
-        case "DATABASE":
-            clauses.append("PASSWORD = N'<insert a password here>'")
-        default:
-            if !login.isEmpty { clauses.append("LOGIN = \(SQLIdentifier.quote(login))") }
-        }
-        let schema = row.string("DefaultSchema")
-        if !schema.isEmpty { clauses.append("DEFAULT_SCHEMA = \(SQLIdentifier.quote(schema))") }
-
+    /// The CREATE USER form for a `sys.database_principals` row. The source of the user's
+    /// identity (`FOR LOGIN`, `WITHOUT LOGIN`, `FROM EXTERNAL PROVIDER`, a password for a
+    /// contained user) is part of the statement head; only DEFAULT_SCHEMA (and the
+    /// contained user's password) belong in the WITH clause.
+    public static func createUserStatement(name: String, typeDesc: String,
+                                           authenticationType: String, login: String,
+                                           defaultSchema: String, certificate: String = "",
+                                           asymmetricKey: String = "") -> String {
+        let target = SQLIdentifier.quote(name)
+        let type = typeDesc.uppercased()
+        var withClauses: [String] = []
         var out = "CREATE USER \(target)"
-        if !clauses.isEmpty { out += " WITH " + clauses.joined(separator: ", ") }
+
+        if type == "CERTIFICATE_MAPPED_USER", !certificate.isEmpty {
+            out += " FOR CERTIFICATE \(SQLIdentifier.quote(certificate))"
+        } else if type == "ASYMMETRIC_KEY_MAPPED_USER", !asymmetricKey.isEmpty {
+            out += " FOR ASYMMETRIC KEY \(SQLIdentifier.quote(asymmetricKey))"
+        } else {
+            switch authenticationType.uppercased() {
+            case "NONE":
+                // No login behind the user: schema owners and impersonation targets.
+                out += " WITHOUT LOGIN"
+            case "DATABASE":
+                // A contained database user carries its own password.
+                withClauses.append("PASSWORD = N'<insert a password here>'")
+            case "EXTERNAL":
+                out += " FROM EXTERNAL PROVIDER"
+            default:
+                // INSTANCE and WINDOWS: mapped to a server login when one is found; a
+                // Windows user in a contained database is created from its own name.
+                if !login.isEmpty { out += " FOR LOGIN \(SQLIdentifier.quote(login))" }
+            }
+        }
+        if !defaultSchema.isEmpty {
+            withClauses.append("DEFAULT_SCHEMA = \(SQLIdentifier.quote(defaultSchema))")
+        }
+        if !withClauses.isEmpty { out += " WITH " + withClauses.joined(separator: ", ") }
         return out + ";\nGO\n"
     }
 
@@ -361,7 +414,7 @@ extension ScriptGenerator {
         WHERE r.name = \(SQLIdentifier.literal(name))
         ORDER BY m.name;
         """
-        for member in (try? await rows(memberSQL, database: database)) ?? [] {
+        for member in try await rows(memberSQL, database: database) {
             let memberName = member.string("MemberName")
             guard !memberName.isEmpty else { continue }
             out += "ALTER ROLE \(target) ADD MEMBER \(SQLIdentifier.quote(memberName));\nGO\n"
@@ -428,44 +481,72 @@ extension ScriptGenerator {
         SELECT
             CAST(pf.boundary_value_on_right AS int)       AS RangeRight,
             t.name                                        AS TypeName,
+            ISNULL(base.name, t.name)                     AS BaseTypeName,
+            ISNULL(ts.name, N'')                          AS TypeSchema,
+            CAST(t.is_user_defined AS int)                AS IsUserDefined,
             CAST(pp.max_length AS int)                    AS MaxLength,
             CAST(pp.precision AS int)                     AS TypePrecision,
-            CAST(pp.scale AS int)                         AS TypeScale,
-            STUFF((SELECT N', ' + CONVERT(nvarchar(max), rv.value, 121)
-                   FROM sys.partition_range_values AS rv
-                   WHERE rv.function_id = pf.function_id
-                   ORDER BY rv.boundary_id
-                   FOR XML PATH(N''), TYPE).value(N'.', N'nvarchar(max)'), 1, 2, N'')
-                                                          AS BoundaryValues
+            CAST(pp.scale AS int)                         AS TypeScale
         FROM sys.partition_functions AS pf
         JOIN sys.partition_parameters AS pp ON pp.function_id = pf.function_id
         JOIN sys.types AS t ON t.user_type_id = pp.user_type_id
+        LEFT JOIN sys.types AS base ON base.user_type_id = t.system_type_id
+             AND base.is_user_defined = 0
+        LEFT JOIN sys.schemas AS ts ON ts.schema_id = t.schema_id
         WHERE pf.name = \(SQLIdentifier.literal(name));
         """
         guard let row = try await rows(sql, database: database).first else {
             throw SQLServerError.objectNotFound(name)
         }
         let typeName = ScriptGenerator.formatType(name: row.string("TypeName"),
-                                                  baseName: row.string("TypeName"),
+                                                  schema: row.string("TypeSchema"),
+                                                  baseName: row.string("BaseTypeName"),
                                                   maxLength: row.int("MaxLength"),
                                                   precision: row.int("TypePrecision"),
                                                   scale: row.int("TypeScale"),
-                                                  isUserDefined: false)
-        // Boundary values are already rendered as literals by CONVERT; text and date types
-        // need quoting, which the type test below applies.
+                                                  isUserDefined: row.bool("IsUserDefined"))
+        let boundaries = try await rows(Self.partitionFunctionBoundariesQuery(name: name),
+                                        database: database)
+            .map { $0.string("BoundaryValue") }
+        return Self.partitionFunctionStatement(name: name, typeName: typeName,
+                                               baseTypeName: row.string("BaseTypeName"),
+                                               rangeRight: row.bool("RangeRight"),
+                                               boundaryValues: boundaries)
+    }
+
+    /// One row per boundary value, in boundary order. Date and time values are rendered
+    /// with style 126 (`2024-03-04T10:00:00`), the ISO form every DATEFORMAT reads the
+    /// same way; style 121 produces `2024-03-04 10:00:00.000`, which a login whose
+    /// language is British or German reads as the 3rd of April when the type is datetime.
+    public static func partitionFunctionBoundariesQuery(name: String) -> String {
+        """
+        SELECT CASE WHEN CONVERT(nvarchar(128), SQL_VARIANT_PROPERTY(rv.value, 'BaseType'))
+                         IN (N'datetime', N'smalldatetime', N'datetime2', N'datetimeoffset',
+                             N'date', N'time')
+                    THEN CONVERT(nvarchar(max), rv.value, 126)
+                    ELSE CONVERT(nvarchar(max), rv.value) END AS BoundaryValue
+        FROM sys.partition_range_values AS rv
+        JOIN sys.partition_functions AS pf ON pf.function_id = rv.function_id
+        WHERE pf.name = \(SQLIdentifier.literal(name))
+        ORDER BY rv.boundary_id;
+        """
+    }
+
+    /// `CREATE PARTITION FUNCTION` from its catalog description. `boundaryValues` is the
+    /// text `partitionFunctionBoundariesQuery` renders; text, date and guid boundaries are
+    /// quoted, numbers stay bare.
+    public static func partitionFunctionStatement(name: String, typeName: String,
+                                                  baseTypeName: String, rangeRight: Bool,
+                                                  boundaryValues: [String]) -> String {
         let needsQuotes = ["char", "varchar", "nchar", "nvarchar", "date", "datetime",
                            "datetime2", "smalldatetime", "datetimeoffset", "time",
                            "uniqueidentifier"]
-            .contains { typeName.lowercased().hasPrefix($0) }
-        let values = row.string("BoundaryValues")
-            .split(separator: ",")
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
+            .contains { baseTypeName.lowercased().hasPrefix($0) }
+        let values = boundaryValues
             .map { needsQuotes ? SQLIdentifier.literal($0) : $0 }
             .joined(separator: ", ")
-
-        return "CREATE PARTITION FUNCTION \(target) (\(typeName))\n"
-            + "    AS RANGE \(row.bool("RangeRight") ? "RIGHT" : "LEFT")\n"
+        return "CREATE PARTITION FUNCTION \(SQLIdentifier.quote(name)) (\(typeName))\n"
+            + "    AS RANGE \(rangeRight ? "RIGHT" : "LEFT")\n"
             + "    FOR VALUES (\(values));\nGO\n"
     }
 

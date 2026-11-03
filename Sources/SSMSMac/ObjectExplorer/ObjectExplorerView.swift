@@ -52,6 +52,9 @@ struct ObjectExplorerView: View {
                 .toggleStyle(.button)
                 .buttonStyle(.plain)
                 .help("Show system objects")
+                .onChange(of: model.showSystemObjects) { _, _ in
+                    Task { await model.reloadAll() }
+                }
 
                 Spacer()
             }
@@ -79,11 +82,12 @@ struct ObjectExplorerView: View {
         .padding(.vertical, 6)
     }
 
+    /// The filter applies to every open folder, not just the server roots: an open
+    /// Tables folder has to be listed again or it keeps showing the unfiltered list.
     private func applyFilter() {
+        guard model.filterText != filterDraft else { return }
         model.filterText = filterDraft
-        Task {
-            for root in model.roots { await model.refresh(root) }
-        }
+        Task { await model.reloadAll() }
     }
 
     private var tree: some View {

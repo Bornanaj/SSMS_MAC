@@ -216,4 +216,6 @@ exit(runSQLServerKitTests(t, extra: { runner in
     runAlwaysOnTests(runner)
     runPlanTests(runner)
     runBackupTests(runner)
+    runQueryTests(runner)
+    runCLITests(runner)
 }))

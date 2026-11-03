@@ -182,6 +182,25 @@ func runBackupTests(_ t: TestRunner) {
                 "a newer copy-only full restores on its own")
         t.equal(ids(RestoreChainBuilder.chain(ending: log3, in: all + [copy])), [1, 3, 4, 5],
                 "a copy-only full does not disturb the log chain")
+
+        // The compression analyzer and other tools back up to the NUL device, and msdb records
+        // those sets like any other, but there is no file to restore from.
+        var nulFull = set(7, "D", first: "510", last: "520", checkpoint: "515", finished: "2026-10-20 21:00:00")
+        nulFull.files = [["NUL"]]
+        var nulLog = set(8, "L", first: "600", last: "900", base: "150", finished: "2026-10-22 01:00:00")
+        nulLog.files = [["nul:"]]
+        t.expect(nulFull.isNullDevice && nulLog.isNullDevice, "NUL and nul: are the null device")
+        t.expect(!full.isNullDevice && !copy.isNullDevice, "a file is not")
+        let withNul: [BackupSetInfo] = all + [nulFull, nulLog]
+        t.equal(ids(RestoreChainBuilder.chain(pointInTime: nil, in: withNul)), [1, 3, 4, 5],
+                "the latest restore never picks a backup written to NUL")
+        t.equal(ids(RestoreChainBuilder.chain(ending: log3, in: withNul)), [1, 3, 4, 5],
+                "nor does a chain ending at a log")
+        t.equal(RestoreChainBuilder.chain(pointInTime: date("2026-10-22 00:30:00"), in: withNul).failureValue,
+                .pointInTimeNotCovered(latest: log3.finished),
+                "a time only a NUL log reaches is reported as not covered")
+        t.expect(RestoreChainBuilder.chain(ending: nulFull, in: withNul).failureValue != nil,
+                 "a NUL set cannot be the target either")
     }
 
     // MARK: - Scripts
@@ -336,7 +355,8 @@ func runBackupTests(_ t: TestRunner) {
         options.databases = DatabaseSelection(scope: .user, excluded: ["Scratch"])
         options.type = .log
         options.retention = BackupRetention(rule: .olderThanHours, value: 48)
-        let schedule = BackupSchedule.parse("every 15 minutes", today: date("2026-10-19")) ?? BackupSchedule()
+        let schedule = BackupSchedule.parse("every 15 minutes", today: date("2026-10-19"))
+            ?? BackupSchedule(startDate: date("2026-10-19"))
         let config = BackupJobConfig(backup: options, schedules: [schedule])
         let command = "SET NOCOUNT ON;\n\(config.comment())\nDECLARE @db sysname;"
         let parsed = BackupJobConfig.parse(fromCommand: command)

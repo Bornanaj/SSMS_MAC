@@ -31,6 +31,14 @@ struct ScriptPlanSheet: View {
     @State private var isError = false
     @State private var editedScript = ""
     @State private var confirmRunAll = false
+    /// A step that can lose data waits here for its confirmation.
+    @State private var pendingDestructive: PendingStep?
+
+    private struct PendingStep: Identifiable {
+        let id = UUID()
+        let step: ScriptStep
+        let scriptOverride: String?
+    }
 
     @MainActor
     init(launch: ScriptPlanLaunch, app: AppState, templatePassword: String) {
@@ -82,12 +90,48 @@ struct ScriptPlanSheet: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Each step runs on its own instance, in order, stopping at the first "
-                 + "failure.")
+                 + "failure."
+                 + (remainingIsDestructive
+                    ? " One of them forces a failover that can lose committed transactions."
+                    : ""))
+        }
+        .confirmationDialog("Force the failover and accept data loss?",
+                            isPresented: Binding(get: { pendingDestructive != nil },
+                                                 set: { if !$0 { pendingDestructive = nil } }),
+                            titleVisibility: .visible) {
+            Button("Force Failover", role: .destructive) {
+                guard let pending = pendingDestructive else { return }
+                pendingDestructive = nil
+                Task { await run(step: pending.step, scriptOverride: pending.scriptOverride) }
+            }
+            Button("Cancel", role: .cancel) { pendingDestructive = nil }
+        } message: {
+            Text("FORCE_FAILOVER_ALLOW_DATA_LOSS makes this replica the primary without "
+                 + "waiting for the old primary: transactions it had not sent yet are lost, "
+                 + "and the other replicas stop until their data movement is resumed.")
         }
     }
 
     private var remainingCount: Int {
         plan.steps.filter { plan.state(of: $0) == .pending }.count
+    }
+
+    private var remainingIsDestructive: Bool {
+        plan.steps.contains { plan.state(of: $0) == .pending && isDestructive($0) }
+    }
+
+    /// A forced failover is the one step in these plans that can lose committed work,
+    /// so it never runs from a single click.
+    private func isDestructive(_ step: ScriptStep) -> Bool {
+        !step.isReadOnly && step.script.uppercased().contains("ALLOW_DATA_LOSS")
+    }
+
+    private func requestRun(step: ScriptStep, scriptOverride: String?) {
+        if isDestructive(step) {
+            pendingDestructive = PendingStep(step: step, scriptOverride: scriptOverride)
+        } else {
+            Task { await run(step: step, scriptOverride: scriptOverride) }
+        }
     }
 
     // MARK: - Connections
@@ -189,7 +233,7 @@ struct ScriptPlanSheet: View {
     private var toolbar: some View {
         HStack(spacing: 8) {
             Button {
-                Task { await runNext() }
+                runNext()
             } label: {
                 Label(nextStep.map { "Run Step \(index(of: $0) + 1)" } ?? "Run Next Step",
                       systemImage: "play.fill")
@@ -317,7 +361,7 @@ struct ScriptPlanSheet: View {
                     }
                     Spacer()
                     Button("Run This Step") {
-                        Task { await run(step: step, scriptOverride: editedScript) }
+                        requestRun(step: step, scriptOverride: editedScript)
                     }
                     .disabled(isRunning || plan.state(of: step) == .running)
                 }
@@ -384,15 +428,17 @@ struct ScriptPlanSheet: View {
                 }
             }
             .keyboardShortcut(.cancelAction)
+            // Closing tears down the sessions, including the one a step is running on.
+            .disabled(isRunning)
         }
         .padding(12)
     }
 
     // MARK: - Running
 
-    private func runNext() async {
+    private func runNext() {
         guard let step = nextStep else { return }
-        await run(step: step, scriptOverride: step.id == selectedStepID ? editedScript : nil)
+        requestRun(step: step, scriptOverride: step.id == selectedStepID ? editedScript : nil)
     }
 
     private func runRemaining() async {

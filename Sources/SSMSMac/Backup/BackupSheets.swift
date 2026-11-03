@@ -161,7 +161,12 @@ struct ScheduleRestoreSheet: View {
             options = restore
             schedules = config.schedules
         } else {
-            options.sourceDatabase = window.selectedDatabase ?? historyDatabases.first ?? ""
+            // Only a database with history can be preselected: the picker lists those,
+            // and a name outside the list leaves it blank while Save stays enabled.
+            let selected = window.selectedDatabase.flatMap { name in
+                historyDatabases.first { $0.caseInsensitiveCompare(name) == .orderedSame }
+            }
+            options.sourceDatabase = selected ?? historyDatabases.first ?? ""
             schedules = [BackupSchedule(name: "Daily at 18:30", startTime: 18 * 3600 + 1800, startDate: window.serverNow)]
         }
     }

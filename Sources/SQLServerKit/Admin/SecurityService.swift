@@ -201,6 +201,11 @@ public struct SecurityService: Sendable {
     }
 
     public func createLoginScript(_ definition: LoginDefinition) throws -> String {
+        try SecurityService.createLoginScriptStatic(definition)
+    }
+
+    /// Pure string building, so a dialog can produce the script before it has a session.
+    public static func createLoginScriptStatic(_ definition: LoginDefinition) throws -> String {
         guard !definition.name.trimmingCharacters(in: .whitespaces).isEmpty else {
             throw SQLServerError.invalidProfile("A login name is required.")
         }
@@ -215,9 +220,13 @@ public struct SecurityService: Sendable {
             // The password is a literal, not an identifier: escape the quotes in it.
             var options = ["PASSWORD = \(SQLIdentifier.literal(definition.password))"]
             if definition.mustChangePassword { options[0] += " MUST_CHANGE" }
-            options.append("CHECK_POLICY = \(definition.enforcePolicy ? "ON" : "OFF")")
-            if definition.enforcePolicy {
-                options.append("CHECK_EXPIRATION = \(definition.enforceExpiration ? "ON" : "OFF")")
+            // MUST_CHANGE needs CHECK_EXPIRATION = ON, and that needs CHECK_POLICY = ON
+            // (Msg 15099 / 15128): the rule changePasswordScriptStatic applies too.
+            let expire = definition.enforceExpiration || definition.mustChangePassword
+            let policy = definition.enforcePolicy || expire
+            options.append("CHECK_POLICY = \(policy ? "ON" : "OFF")")
+            if policy {
+                options.append("CHECK_EXPIRATION = \(expire ? "ON" : "OFF")")
             }
             if !definition.defaultDatabase.isEmpty {
                 options.append("DEFAULT_DATABASE = \(SQLIdentifier.quote(definition.defaultDatabase))")

@@ -298,8 +298,19 @@ public struct LiveSchemaReader: Sendable {
         WHERE c.object_id IN (SELECT object_id FROM sys.tables WHERE is_ms_shipped = 0
                               UNION ALL SELECT type_table_object_id FROM sys.table_types)
         ORDER BY c.object_id, c.column_id;
+
+        SELECT c.object_id, c.column_id, c.name
+        FROM sys.columns AS c
+        JOIN sys.objects AS o ON o.object_id = c.object_id
+        WHERE o.is_ms_shipped = 0 AND o.type IN ('V', 'TF', 'IF', 'FT');
         """
-        for row in try await rows(sql, context) {
+        let sets = try await resultSets(sql, context)
+        // Views and table-valued functions have columns too: extended properties on them need
+        // the names, though the columns are no part of a table definition.
+        for row in sets.count > 1 ? sets[1] : [] {
+            context.columnNames[ColumnID(object: row.int("object_id"), column: row.int("column_id"))] = row.string("name")
+        }
+        for row in sets.first ?? [] {
             let objectID = row.int("object_id")
             let column = Self.column(from: row)
             context.columnsByObject[objectID, default: []].append(column)
@@ -342,8 +353,10 @@ public struct LiveSchemaReader: Sendable {
         var column = ColumnDefinition(name: row.string("name"), dataType: dataType,
                                       isUserDefinedType: isUserDefined,
                                       isNullable: row.bool("is_nullable"))
+        // An alias type's collation is the type's own and cannot be written on the column
+        // (Msg 452), so it is not a column property.
         let collation = row.string("collation_name")
-        column.collation = collation.isEmpty ? nil : collation
+        column.collation = isUserDefined || collation.isEmpty ? nil : collation
         if row.bool("is_identity") {
             column.identity = IdentitySpec(seed: row.string("seed_value", default: "1"),
                                            increment: row.string("increment_value", default: "1"),
@@ -445,7 +458,10 @@ public struct LiveSchemaReader: Sendable {
             let dataSpace = row.string("data_space", default: "PRIMARY")
             let lob = row.string("lob_data_space")
             let partitionColumn = row.string("partition_column")
-            let compression = row.string("data_compression", default: "NONE")
+            var compression = row.string("data_compression", default: "NONE")
+            // A clustered columnstore index reports COLUMNSTORE for the table; the compression
+            // belongs to that index, and CREATE TABLE cannot ask for it.
+            if compression.uppercased().hasPrefix("COLUMNSTORE") { compression = "NONE" }
             let lockEscalation = row.string("lock_escalation_desc", default: "TABLE")
             let durability = row.string("durability_desc")
             let changeTracking = row.bool("change_tracking")
@@ -468,7 +484,8 @@ public struct LiveSchemaReader: Sendable {
     // MARK: - Indexes and constraints
 
     private func readIndexes(_ context: inout ReadContext) async throws {
-        let sequentialKey = context.majorVersion >= 15 && !context.isAzure
+        // SQL Server 2019 and Azure SQL Database (which reports version 12) have the column.
+        let sequentialKey = context.majorVersion >= 15 || context.isAzure
             ? "CONVERT(int, i.optimize_for_sequential_key)" : "0"
         let sql = """
         SELECT i.object_id, i.index_id, i.name, CONVERT(int, i.type) AS index_type,
@@ -525,9 +542,14 @@ public struct LiveSchemaReader: Sendable {
             guard let key = context.objectKeys[objectID] else { continue }
             let indexID = IndexID(object: objectID, index: row.int("index_id"))
             let members = columns[indexID] ?? []
+            // XML and spatial indexes record their one column with key_ordinal 0.
+            let indexType = row.int("index_type")
+            let keyedByPosition = indexType == 3 || indexType == 4
             let keyColumns: [IndexColumn] = members
-                .filter { !$0.bool("is_included_column") && $0.int("key_ordinal") > 0 }
-                .sorted { $0.int("key_ordinal") < $1.int("key_ordinal") }
+                .filter { !$0.bool("is_included_column") && ($0.int("key_ordinal") > 0 || keyedByPosition) }
+                .sorted {
+                    ($0.int("key_ordinal"), $0.int("index_column_id")) < ($1.int("key_ordinal"), $1.int("index_column_id"))
+                }
                 .map { IndexColumn(name: $0.string("name"), isDescending: $0.bool("is_descending_key")) }
             let included: [String] = members
                 .filter { $0.bool("is_included_column") }
@@ -1032,7 +1054,8 @@ public struct LiveSchemaReader: Sendable {
             }
             let body = writer.tableTypeBody(quotedName: object.quotedName, columns: columns, indexes: typeIndexes,
                                             checks: checks[tableID] ?? [],
-                                            memoryOptimized: row.bool("is_memory_optimized"))
+                                            memoryOptimized: row.bool("is_memory_optimized"),
+                                            defaultCollation: context.collation)
             object.body = body
             let owner = row.string("owner_name")
             if !owner.isEmpty { object.owner = owner }

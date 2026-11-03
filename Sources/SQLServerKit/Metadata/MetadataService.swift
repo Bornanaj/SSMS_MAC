@@ -1800,6 +1800,34 @@ public struct MetadataService: Sendable {
             )
         }
 
+        // A DML trigger lives under its table's (or view's) Triggers folder, not under
+        // Programmability > Database Triggers, so its id has to be built from the parent
+        // for "reveal in tree" to find it.
+        if objectKind == .trigger, !parentName.isEmpty {
+            let parentKind: ObjectNodeKind = row.string("ParentType").uppercased() == "V"
+                ? .view : .table
+            let parentFolderID = MetadataNodeID.folderPath(databaseID, for: parentKind)
+            let parentObjectID = MetadataNodeID.object(parentFolderID, parentKind,
+                                                       schema: schema, name: parentName)
+            let triggersFolder = MetadataNodeID.folder(parentObjectID, .triggers)
+            return ObjectExplorerNode(
+                id: MetadataNodeID.object(triggersFolder, .trigger, schema: nil, name: name),
+                parentID: triggersFolder,
+                kind: .trigger,
+                folder: nil,
+                label: "\(schema).\(parentName).\(name)",
+                detail: "(\(MetadataLabels.kindTitle(.trigger)))",
+                iconName: MetadataIcon.name(for: .trigger),
+                isExpandable: false,
+                database: database,
+                schema: schema,
+                name: name,
+                objectID: row.int("ObjectId"),
+                isSystemObject: false,
+                info: ["parentTable": parentName, "matchKind": "object", "objectType": objectType]
+            )
+        }
+
         return ObjectExplorerNode(
             id: ownerID,
             parentID: ownerFolderID,

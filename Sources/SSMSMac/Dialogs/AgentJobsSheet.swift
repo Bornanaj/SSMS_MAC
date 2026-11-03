@@ -399,8 +399,10 @@ struct AgentJobsSheet: View {
         do {
             try await work()
             isError = false
-            status = successMessage
             await load()
+            await loadDetail()
+            // After the reload, so the list's own status line does not replace it.
+            status = successMessage
         } catch {
             isError = true
             status = String(describing: error)
@@ -436,13 +438,13 @@ struct AgentJobsSheet: View {
         }
         let service = AgentService(session: server.session)
         do {
-            // Steps load whichever tab is showing: "Start at Step" needs them, and a
-            // job's step list is a handful of rows.
+            // Steps and schedules load whichever tab is showing: "Start at Step" needs
+            // the steps, "Script" needs both, and either is a handful of rows. Only the
+            // history, which can be long, waits for its tab.
             steps = try await service.steps(jobID: job.id)
-            switch detail {
-            case .steps: break
-            case .schedules: schedules = try await service.schedules(jobID: job.id)
-            case .history: history = try await service.history(jobID: job.id)
+            schedules = try await service.schedules(jobID: job.id)
+            if detail == .history {
+                history = try await service.history(jobID: job.id)
             }
             isError = false
         } catch {

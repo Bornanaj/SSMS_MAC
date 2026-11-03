@@ -343,10 +343,17 @@ public final class TDSConnection: @unchecked Sendable {
             // loop hop, so a failure here can never strand an unfulfilled promise.
             let future: EventLoopFuture<ByteBuffer> = try await channel.eventLoop.submit {
                 [handler, channel] () -> EventLoopFuture<ByteBuffer> in
+                guard channel.isActive else {
+                    throw TDSError.connectionClosed(reason: "the connection is no longer open")
+                }
                 guard !handler.isBusy else { throw TDSError.busy }
                 let promise = channel.eventLoop.makePromise(of: ByteBuffer.self)
                 handler.beginRaw(promise: promise)
-                channel.writeAndFlush(TDSMessage(type: type, payload: payload), promise: nil)
+                // A write that fails (the socket went away between the check and the
+                // write) must fail the request too, or the caller waits forever.
+                let written = channel.eventLoop.makePromise(of: Void.self)
+                written.futureResult.whenFailure { [handler] error in handler.failPending(error) }
+                channel.writeAndFlush(TDSMessage(type: type, payload: payload), promise: written)
                 return promise.futureResult
             }.get()
             return try await future.get()
@@ -360,11 +367,16 @@ public final class TDSConnection: @unchecked Sendable {
         try await requestLock.withLock {
             let future: EventLoopFuture<Void> = try await channel.eventLoop.submit {
                 [handler, channel] () -> EventLoopFuture<Void> in
+                guard channel.isActive else {
+                    throw TDSError.connectionClosed(reason: "the connection is no longer open")
+                }
                 guard !handler.isBusy else { throw TDSError.busy }
                 let promise = channel.eventLoop.makePromise(of: Void.self)
                 handler.beginTokens(sink: sink, promise: promise)
+                let written = channel.eventLoop.makePromise(of: Void.self)
+                written.futureResult.whenFailure { [handler] error in handler.failPending(error) }
                 channel.writeAndFlush(TDSMessage(type: type, payload: payload,
-                                                 resetConnection: resetConnection), promise: nil)
+                                                 resetConnection: resetConnection), promise: written)
                 return promise.futureResult
             }.get()
             try await future.get()
@@ -411,7 +423,6 @@ public final class TDSConnection: @unchecked Sendable {
     public func cancel() {
         channel.eventLoop.execute { [channel, handler] in
             guard handler.isBusy else { return }
-            handler.attentionSent = true
             let empty = channel.allocator.buffer(capacity: 0)
             channel.writeAndFlush(TDSMessage(type: .attention, payload: empty), promise: nil)
         }

@@ -12,13 +12,15 @@ struct SchemaCommand {
         var options = SchemaCompareOptions()
         var filter = SchemaFilter()
         var mappings = SchemaMappings()
+        var project: CompareProject?
 
         if let path = args.string("project") {
-            let project = try CompareProject.read(from: URL(fileURLWithPath: path))
-            guard let schema = project.schema else { throw CLIError.usage("\(path) is not a schema compare project.") }
+            let loaded = try readProject(path)
+            guard let schema = loaded.schema else { throw CLIError.usage("\(path) is not a schema compare project.") }
             options = schema.options
             filter = schema.filter
             mappings = schema.mappings
+            project = loaded
         }
         if let list = args.string("options") {
             let unknown = options.apply(list: list)
@@ -40,8 +42,13 @@ struct SchemaCommand {
             guard parts.count == 2 else { throw CLIError.usage("--map-schema expects source=target") }
             mappings.schemaMappings.append(SchemaNameMapping(source: parts[0], target: parts[1]))
         }
+        // Values that cannot be right are refused before anything is read or connected to.
+        let abortThreshold = try Self.warningThreshold(args.string("abort-on-warnings"))
+        let report: (path: String, format: CompareReportFormat)? = try args.string("report").map { path in
+            (path, try reportFormat(path: path, explicit: args.string("report-type")))
+        }
 
-        let sourceEndpoint = EndpointArguments(prefix: "source", args: args)
+        let sourceEndpoint = EndpointArguments(prefix: "source", args: args, defaults: project?.source)
         let source = try await loadSide(sourceEndpoint, quiet: quiet)
 
         if let path = args.string("make-snapshot") {
@@ -52,8 +59,8 @@ struct SchemaCommand {
             let count = try ScriptsFolder.write(source, to: URL(fileURLWithPath: path), removeStale: args.flag("remove-stale"))
             log("Scripts folder written to \(path) (\(count) files).", quiet: quiet)
         }
-        let targetEndpoint = EndpointArguments(prefix: "target", args: args)
-        guard targetEndpoint.server != nil || targetEndpoint.snapshot != nil || targetEndpoint.scripts != nil else {
+        let targetEndpoint = EndpointArguments(prefix: "target", args: args, defaults: project?.target)
+        guard targetEndpoint.isSpecified else {
             if args.has("make-snapshot") || args.has("make-scripts") { return .success }
             throw CLIError.usage("A target is required: --target-server/--target-database, --target-snapshot or --target-scripts.")
         }
@@ -61,29 +68,36 @@ struct SchemaCommand {
 
         let comparison = SchemaComparer(options: options, filter: filter, mappings: mappings)
             .compare(source: source, target: target)
-        printSummary(comparison, quiet: quiet)
+        // With the script on stdout the summary moves to stderr, so the output stays a script.
+        let scriptToStdout = args.has("script") && scriptGoesToStandardOutput(args.string("script"))
+        printSummary(comparison, quiet: quiet, toStandardError: scriptToStdout)
 
-        if let path = args.string("report") {
-            let format = CompareReportFormat(rawValue: (args.string("report-type") ?? inferFormat(path)).lowercased()) ?? .html
-            let data = try SchemaCompareReport(comparison: comparison).render(format)
-            try data.write(to: URL(fileURLWithPath: path))
-            log("Report written to \(path).", quiet: quiet)
+        if let report {
+            let data = try SchemaCompareReport(comparison: comparison).render(report.format)
+            try data.write(to: URL(fileURLWithPath: report.path))
+            log("Report written to \(report.path).", quiet: quiet)
         }
 
-        let plan = SchemaDeploymentPlanner(comparison: comparison, targetDatabaseName: targetEndpoint.database).plan()
-        if args.has("script") || args.flag("deploy") {
+        let scripting = args.has("script") || args.flag("deploy")
+        if scripting, source.objects.isEmpty, comparison.count(.onlyInTarget) > 0, !args.flag("allow-empty-source") {
+            throw CLIError.usage("The source (\(source.origin)) has no objects, so the deployment would drop every "
+                                 + "object in the target. Pass --allow-empty-source if that is what you want.")
+        }
+        // A saved project deploys the selection it was saved with.
+        let selectedIDs = Self.selectedIDs(comparison, deselected: project?.schema?.deselected ?? [])
+        let plan = SchemaDeploymentPlanner(comparison: comparison, targetDatabaseName: targetEndpoint.database)
+            .plan(selectedIDs: selectedIDs)
+        if scripting {
             for warning in plan.warnings {
                 log("[\(warning.severity.title)] \(warning.object): \(warning.message)", quiet: quiet)
             }
-            if let limit = args.string("abort-on-warnings"),
-               let threshold = DeploymentWarningSeverity(rawValue: limit.lowercased()),
-               let worst = plan.highestSeverity, worst <= threshold {
+            if let abortThreshold, let worst = plan.highestSeverity, worst <= abortThreshold {
                 log("Stopping: the deployment has \(worst.title.lowercased())-severity warnings.", quiet: false)
                 return .differencesFound
             }
         }
         if let path = args.string("script") {
-            if path == "true" || path == "-" {
+            if scriptToStdout {
                 print(plan.script)
             } else {
                 try plan.script.write(toFile: path, atomically: true, encoding: .utf8)
@@ -92,7 +106,7 @@ struct SchemaCommand {
         }
         if args.flag("deploy") {
             if let folder = targetEndpoint.scripts {
-                let changes = try ScriptsFolder.apply(comparison, to: URL(fileURLWithPath: folder))
+                let changes = try ScriptsFolder.apply(comparison, selectedIDs: selectedIDs, to: URL(fileURLWithPath: folder))
                 for change in changes { log(change, quiet: quiet) }
                 return .success
             }
@@ -106,7 +120,11 @@ struct SchemaCommand {
                     FileHandle.standardError.write(Data("  \(done)/\(total) batches\n".utf8))
                 }
             }
-            if args.flag("verbose") { for message in outcome.messages { print(message) } }
+            if args.flag("verbose") {
+                for message in outcome.messages {
+                    if scriptToStdout { log(message, quiet: quiet) } else { print(message) }
+                }
+            }
             guard outcome.succeeded else {
                 log("Deployment failed: \(outcome.error ?? "unknown error")", quiet: false)
                 if let batch = outcome.failedBatch { log("Failing batch:\n\(batch)", quiet: false) }
@@ -122,15 +140,34 @@ struct SchemaCommand {
         return comparison.hasDifferences ? .differencesFound : .identical
     }
 
-    private func printSummary(_ comparison: SchemaComparison, quiet: Bool) {
+    /// `--abort-on-warnings`, which used to be ignored when misspelled.
+    static func warningThreshold(_ text: String?) throws -> DeploymentWarningSeverity? {
+        guard let text else { return nil }
+        guard let severity = DeploymentWarningSeverity(rawValue: text.lowercased()) else {
+            throw CLIError.usage("--abort-on-warnings is high, medium or low, not '\(text)'.")
+        }
+        return severity
+    }
+
+    /// Every difference except the ones the project saved as unticked; nil keeps the
+    /// comparison's own ticks when nothing was unticked.
+    static func selectedIDs(_ comparison: SchemaComparison, deselected: Set<String>) -> Set<String>? {
+        guard !deselected.isEmpty else { return nil }
+        return Set(comparison.differences.filter { $0.status != .identical && !deselected.contains($0.id) }.map(\.id))
+    }
+
+    private func printSummary(_ comparison: SchemaComparison, quiet: Bool, toStandardError: Bool) {
+        func emit(_ line: String) {
+            if toStandardError { log(line, quiet: quiet) } else { print(line) }
+        }
         let showAll = args.flag("verbose")
         for difference in comparison.differences where difference.status != .identical || showAll {
-            print("\(difference.status.symbol) \(difference.type.title): \(difference.displayName)")
+            emit("\(difference.status.symbol) \(difference.type.title): \(difference.displayName)")
             if difference.status == .different {
-                for line in difference.details { print("      \(line)") }
+                for line in difference.details { emit("      \(line)") }
             }
             if args.flag("show") {
-                print("----- source\n\(difference.sourceScript)----- target\n\(difference.targetScript)")
+                emit("----- source\n\(difference.sourceScript)----- target\n\(difference.targetScript)")
             }
         }
         if !quiet {
@@ -141,18 +178,24 @@ struct SchemaCommand {
 
     func loadSide(_ endpoint: EndpointArguments, quiet: Bool) async throws -> SchemaSnapshot {
         if let path = endpoint.snapshot {
+            try requirePath(path, option: "--\(endpoint.prefix)-snapshot")
             log("Loading \(endpoint.prefix) snapshot \(path)…", quiet: quiet)
             return try SchemaSnapshotFile.read(from: URL(fileURLWithPath: path))
         }
         if let path = endpoint.scripts {
-            log("Reading \(endpoint.prefix) scripts \(path)…", quiet: quiet)
+            // A path that does not exist used to be read as a single, empty script, so the
+            // "source" had no objects and the deployment dropped everything in the target.
             var isDirectory: ObjCBool = false
-            FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
+            guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) else {
+                throw CLIError.usage("--\(endpoint.prefix)-scripts: \(path) does not exist.")
+            }
+            log("Reading \(endpoint.prefix) scripts \(path)…", quiet: quiet)
             let collation = args.string("\(endpoint.prefix)-collation")
             let snapshot = isDirectory.boolValue
                 ? try ScriptsFolder.read(from: URL(fileURLWithPath: path), defaultCollation: collation)
                 : try ScriptsFolder.readScript(at: URL(fileURLWithPath: path), defaultCollation: collation ?? "")
             if args.flag("verbose") { for warning in snapshot.warnings { log("warning: \(warning)", quiet: quiet) } }
+            if snapshot.objects.isEmpty { log("warning: no objects were read from \(path).", quiet: quiet) }
             return snapshot
         }
         guard let database = endpoint.database else {

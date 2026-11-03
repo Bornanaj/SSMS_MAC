@@ -27,11 +27,9 @@ final class AppSettings: ObservableObject {
 
     @AppStorage("executionTimeoutSeconds") var executionTimeoutSeconds: Int = 0
     @AppStorage("showSystemObjects") var showSystemObjects: Bool = false
-    @AppStorage("confirmDestructiveScripts") var confirmDestructiveScripts: Bool = true
     @AppStorage("queryHistoryLimit") var queryHistoryLimit: Int = 500
     @AppStorage("scriptSelectTopRows") var scriptSelectTopRows: Int = 1000
     @AppStorage("editTopRows") var editTopRows: Int = 200
-    @AppStorage("restoreTabsOnLaunch") var restoreTabsOnLaunch: Bool = true
 
     var editorFont: NSFont {
         NSFont(name: editorFontName, size: editorFontSize)

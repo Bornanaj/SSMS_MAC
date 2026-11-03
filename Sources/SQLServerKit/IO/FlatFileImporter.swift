@@ -81,21 +81,40 @@ public struct FlatFileImporter: Sendable {
             ))
         }
 
-        // A byte-per-line estimate is good enough for a progress bar.
+        // A bytes-per-row estimate is good enough for a progress bar. The parser stops at
+        // the sample limit, so fewer rows than that means the whole file was read and the
+        // count is exact.
         let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
         let byteCount = (attributes?[.size] as? NSNumber)?.intValue ?? 0
-        let sampleBytes = text.utf8.count
-        let sampledLines = max(rows.count, 1)
-        let estimated = sampleBytes > 0 && byteCount > 0
-            ? Int(Double(byteCount) / Double(sampleBytes) * Double(sampledLines))
-            : sampledLines
+        let parsedRows = rows.count + (hasHeader ? 1 : 0)
+        let estimated = FlatFileImporter.estimateRowCount(fileBytes: byteCount,
+                                                          header: header,
+                                                          sampledRows: rows,
+                                                          delimiter: delimiter,
+                                                          sampleIsComplete: parsedRows < sampleRows + 1)
 
         return ImportPreview(detectedDelimiter: delimiter,
                              hasHeaderRow: hasHeader,
                              columns: mappings,
                              sampleRows: Array(rows.prefix(sampleRows)),
-                             estimatedRowCount: max(estimated, sampledLines),
+                             estimatedRowCount: estimated,
                              encodingName: encodingName)
+    }
+
+    /// The file size divided by the average size of the sampled rows. Exact when the
+    /// sample already holds the whole file. Quoting and CRLF line endings are not counted,
+    /// so a file of quoted fields is slightly over-estimated, which is fine for a progress bar.
+    public static func estimateRowCount(fileBytes: Int, header: [String], sampledRows: [[String]],
+                                        delimiter: String, sampleIsComplete: Bool) -> Int {
+        if sampleIsComplete || sampledRows.isEmpty { return sampledRows.count }
+        func bytes(_ row: [String]) -> Int {
+            row.reduce(0) { $0 + $1.utf8.count } + max(row.count - 1, 0) * delimiter.utf8.count + 1
+        }
+        let headerBytes = header.isEmpty ? 0 : bytes(header)
+        let sampleBytes = sampledRows.reduce(0) { $0 + bytes($1) }
+        guard sampleBytes > 0, fileBytes > headerBytes else { return sampledRows.count }
+        let perRow = Double(sampleBytes) / Double(sampledRows.count)
+        return max(sampledRows.count, Int(Double(fileBytes - headerBytes) / perRow))
     }
 
     // MARK: - Scripting and loading
@@ -147,11 +166,18 @@ public struct FlatFileImporter: Sendable {
             var tuples: [String] = []
             tuples.reserveCapacity(end - index)
 
-            for row in rows[index..<end] {
-                let values = included.map { mapping -> String in
+            for (offset, row) in rows[index..<end].enumerated() {
+                let values = try included.map { mapping -> String in
                     let raw = mapping.sourceIndex < row.count ? row[mapping.sourceIndex] : ""
-                    return FlatFileImporter.literal(raw, sqlType: mapping.sqlType,
-                                                    nullable: mapping.isNullable)
+                    do {
+                        return try FlatFileImporter.literal(raw, sqlType: mapping.sqlType,
+                                                            nullable: mapping.isNullable)
+                    } catch {
+                        // 1-based file line, counting the header row the user can see.
+                        let line = index + offset + 1 + (preview.hasHeaderRow ? 1 : 0)
+                        throw SQLServerError.unsupportedOperation(
+                            "Line \(line), column \(mapping.sourceName): \(error)")
+                    }
                 }
                 tuples.append("(" + values.joined(separator: ", ") + ")")
             }
@@ -261,11 +287,16 @@ public struct FlatFileImporter: Sendable {
         if nonEmpty.allSatisfy({ ["0", "1", "true", "false"].contains($0.lowercased()) }) {
             return ("bit", nullable)
         }
-        if nonEmpty.allSatisfy({ Int32($0) != nil }) { return ("int", nullable) }
-        if nonEmpty.allSatisfy({ Int64($0) != nil }) { return ("bigint", nullable) }
-        if nonEmpty.allSatisfy({ isDecimal($0) }) {
-            let (precision, scale) = decimalShape(nonEmpty)
-            return ("decimal(\(precision),\(scale))", nullable)
+        // "02134" is a postal code or an account number, not the number 2134: a leading
+        // zero in front of more digits means the column is text that must keep its zeros.
+        let keepsLeadingZeros = nonEmpty.contains { isZeroPadded($0) }
+        if !keepsLeadingZeros {
+            if nonEmpty.allSatisfy({ Int32($0) != nil }) { return ("int", nullable) }
+            if nonEmpty.allSatisfy({ Int64($0) != nil }) { return ("bigint", nullable) }
+            if nonEmpty.allSatisfy({ isDecimal($0) }) {
+                let (precision, scale) = decimalShape(nonEmpty)
+                return ("decimal(\(precision),\(scale))", nullable)
+            }
         }
         if nonEmpty.allSatisfy({ UUID(uuidString: $0) != nil }) {
             return ("uniqueidentifier", nullable)
@@ -287,6 +318,14 @@ public struct FlatFileImporter: Sendable {
         guard Double(value) != nil else { return false }
         let body = value.hasPrefix("-") || value.hasPrefix("+") ? String(value.dropFirst()) : value
         return body.allSatisfy { $0.isNumber || $0 == "." } && body.filter { $0 == "." }.count <= 1
+    }
+
+    /// "0123", "-007": a zero followed by another digit. "0" and "0.5" are plain numbers.
+    private static func isZeroPadded(_ value: String) -> Bool {
+        let body = value.hasPrefix("-") || value.hasPrefix("+") ? String(value.dropFirst()) : value
+        guard body.hasPrefix("0"), body.count > 1 else { return false }
+        let second = body[body.index(after: body.startIndex)]
+        return second.isNumber
     }
 
     private static func decimalShape(_ values: [String]) -> (precision: Int, scale: Int) {
@@ -325,12 +364,21 @@ public struct FlatFileImporter: Sendable {
     }
 
     /// Build the T-SQL literal for one field, letting the server do the final conversion.
-    public static func literal(_ raw: String, sqlType: String, nullable: Bool) -> String {
+    ///
+    /// An empty cell is NULL when the column allows it and an empty string for a text
+    /// column; for a NOT NULL number or date there is nothing it could honestly mean
+    /// (`''` converts to 0 or 1900-01-01, or fails with Msg 8114), so it is an error.
+    public static func literal(_ raw: String, sqlType: String, nullable: Bool) throws -> String {
         let value = raw.trimmingCharacters(in: .whitespaces)
-        if value.isEmpty || value.uppercased() == "NULL" {
-            return nullable ? "NULL" : "''"
-        }
         let lowered = sqlType.lowercased()
+        let isText = ["char", "varchar", "nchar", "nvarchar", "text", "ntext", "sysname"]
+            .contains { lowered.hasPrefix($0) }
+        if value.isEmpty || value.uppercased() == "NULL" {
+            if nullable { return "NULL" }
+            if isText { return "''" }
+            throw SQLServerError.unsupportedOperation(
+                "the cell is empty and the \(sqlType) column does not allow NULL")
+        }
         if lowered == "bit" {
             let truthy = ["1", "true", "yes", "y", "t"].contains(value.lowercased())
             return truthy ? "1" : "0"
@@ -338,8 +386,13 @@ public struct FlatFileImporter: Sendable {
         if lowered.hasPrefix("int") || lowered.hasPrefix("bigint") || lowered.hasPrefix("smallint")
             || lowered.hasPrefix("tinyint") || lowered.hasPrefix("decimal")
             || lowered.hasPrefix("numeric") || lowered.hasPrefix("float") || lowered.hasPrefix("real") {
-            // Guard against a stray non-numeric value slipping past inference.
-            return Double(value) != nil ? value : "NULL"
+            // A stray non-numeric value that slipped past inference is reported, not
+            // silently turned into NULL.
+            guard Double(value) != nil else {
+                throw SQLServerError.unsupportedOperation(
+                    "'\(value)' is not a \(sqlType) value")
+            }
+            return value
         }
         return SQLIdentifier.literal(value)
     }

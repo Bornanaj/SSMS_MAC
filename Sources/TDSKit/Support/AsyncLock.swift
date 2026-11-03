@@ -6,12 +6,14 @@ import NIOConcurrencyHelpers
 /// Swift actors are reentrant, so an `await` inside an actor method lets a second
 /// call interleave — which is how two catalog queries end up racing for the same
 /// socket. This lock closes that gap.
-final class AsyncLock: @unchecked Sendable {
+public final class AsyncLock: @unchecked Sendable {
     private let lock = NIOLock()
     private var isHeld = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
-    func acquire() async {
+    public init() {}
+
+    public func acquire() async {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             let acquired: Bool = lock.withLock {
                 if isHeld {
@@ -25,7 +27,7 @@ final class AsyncLock: @unchecked Sendable {
         }
     }
 
-    func release() {
+    public func release() {
         let next: CheckedContinuation<Void, Never>? = lock.withLock {
             if waiters.isEmpty {
                 isHeld = false
@@ -36,7 +38,7 @@ final class AsyncLock: @unchecked Sendable {
         next?.resume()
     }
 
-    func withLock<T>(_ body: () async throws -> T) async rethrows -> T {
+    public func withLock<T>(_ body: () async throws -> T) async rethrows -> T {
         await acquire()
         defer { release() }
         return try await body()

@@ -6,19 +6,26 @@ import SQLServerKit
 struct CompareCommand {
     static func main() async {
         let raw = Array(CommandLine.arguments.dropFirst())
+        // Help is answered wherever it is asked for, and never counts as a bad command line.
+        if raw.contains(where: { $0 == "--help" || $0 == "-h" }) {
+            print(usage)
+            exit(ExitCode.success.rawValue)
+        }
         guard let command = raw.first, !command.hasPrefix("-") else {
             print(usage)
             exit(ExitCode.usage.rawValue)
         }
-        let args = Arguments(Array(raw.dropFirst()))
+        let args = Arguments(Array(raw.dropFirst()), booleanFlags: booleanFlags)
         do {
             let code: ExitCode
             switch command.lowercased() {
             case "schema":
+                try args.validate(known: schemaOptions, allowsPositional: false, tool: "ssms-compare")
                 code = try await SchemaCommand(args: args).run()
             case "data":
+                try args.validate(known: dataOptions, allowsPositional: false, tool: "ssms-compare")
                 code = try await DataCommand(args: args).run()
-            case "help", "--help", "-h":
+            case "help":
                 print(usage)
                 code = .success
             default:
@@ -34,6 +41,40 @@ struct CompareCommand {
             exit(ExitCode.generalError.rawValue)
         }
     }
+
+    // MARK: - Option names
+
+    /// Switches that never take the next word as their value.
+    static let booleanFlags: Set<String> = [
+        "deploy", "show", "verbose", "quiet", "assert-identical", "remove-stale", "allow-empty-source",
+        "source-verify-certificate", "target-verify-certificate"
+    ]
+
+    /// `--source-…` and `--target-…` with their Redgate-style short forms.
+    static let endpointOptions: Set<String> = {
+        var names: Set<String> = []
+        for (prefix, number) in [("source", "1"), ("target", "2")] {
+            for name in ["server", "database", "user", "password", "auth", "domain", "token", "encrypt",
+                         "verify-certificate", "snapshot", "scripts", "collation"] {
+                names.insert("\(prefix)-\(name)")
+            }
+            for alias in ["s", "db", "u", "p", "snapshot", "scripts"] { names.insert(alias + number) }
+        }
+        return names
+    }()
+
+    static let commonOptions: Set<String> = [
+        "project", "options", "map-schema", "report", "report-type", "script", "deploy", "show", "verbose", "quiet"
+    ]
+
+    static let schemaOptions: Set<String> = endpointOptions.union(commonOptions).union([
+        "include-type", "exclude-type", "include-object", "exclude-object", "abort-on-warnings",
+        "assert-identical", "make-snapshot", "make-scripts", "remove-stale", "allow-empty-source"
+    ])
+
+    static let dataOptions: Set<String> = endpointOptions.union(commonOptions).union([
+        "include-table", "exclude-table", "map-table", "key", "where", "target-where"
+    ])
 
     /// The help text, with the option names taken from the option lists themselves so they
     /// cannot drift from what `--options` accepts.
@@ -67,7 +108,7 @@ struct CompareCommand {
     USAGE
       ssms-compare schema <source> <target> [options]
       ssms-compare data   <source> <target> [options]
-      ssms-compare help
+      ssms-compare help   (also --help / -h)
 
     SOURCE AND TARGET
       --source-server <host[,port]|host\\instance>   (also /s1:)
@@ -89,11 +130,13 @@ struct CompareCommand {
       --map-schema <source=target>      compare a source schema with a differently named target schema
       --report <file>                   write a report; format from the extension or --report-type
       --report-type html|xml|excel|csv|json
-      --script [file|-]                 write the deployment script (to stdout with - or no value)
+      --script [file|-]                 write the deployment script (to stdout with - or no value;
+                                        the difference summary then goes to stderr)
       --deploy                          run the deployment script against the target
       --show                            list every difference, not only the summary
       --verbose                         also list identical objects, server messages and warnings
       --quiet                           no progress output on stderr
+      Switches take an optional true/false; a misspelled option is an error (exit 64).
 
     SCHEMA OPTIONS
       --include-type <types>            compare only these object types (e.g. table,view,procedure)
@@ -107,6 +150,8 @@ struct CompareCommand {
       --make-snapshot <file.ssnap>      save the source as a snapshot (no target needed)
       --make-scripts <folder>           save the source as a scripts folder, one file per object
       --remove-stale                    with --make-scripts: delete files of objects that are gone
+      --allow-empty-source              script or deploy even when the source has no objects at all,
+                                        which drops every object in the target (refused otherwise)
       Deploying to a --target-scripts folder rewrites the affected object files.
 
       Schema option names for --options (case-insensitive):

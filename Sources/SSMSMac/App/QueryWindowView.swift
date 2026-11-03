@@ -15,10 +15,14 @@ struct QueryWindowView: View {
             if tab.showResultsPane {
                 VSplitView {
                     editor.frame(minHeight: 120)
+                    // The pane is per tab: its grids are built for one tab's result
+                    // sets. The editor above is not, since its text view lives on the
+                    // tab and is adopted by whichever wrapper shows it.
                     ResultsPaneView(tab: tab, settings: settings,
                                     onJumpToLine: jump(toLine:),
                                     onSaveResults: { app.activeSheet = .exportResults(tab.id) })
                         .frame(minHeight: 120, idealHeight: 260)
+                        .id(tab.id)
                 }
             } else {
                 editor
@@ -148,14 +152,7 @@ struct QueryWindowView: View {
     }
 
     private var caretLine: Int {
-        let text = tab.text as NSString
-        let location = min(tab.selectedRange.location, text.length)
-        var line = 1
-        text.enumerateSubstrings(in: NSRange(location: 0, length: location),
-                                 options: [.byLines, .substringNotRequired]) { _, _, _, _ in
-            line += 1
-        }
-        return line
+        TextLines.line(at: tab.selectedRange.location, in: tab.text as NSString)
     }
 
     private var caretColumn: Int {
@@ -165,15 +162,10 @@ struct QueryWindowView: View {
         return location - lineRange.location + 1
     }
 
+    /// Moves the editor's caret. `tab.selectedRange` only mirrors the text view, so the
+    /// editor is told directly, the same way the Go To Line dialog does it.
     private func jump(toLine line: Int) {
-        let text = tab.text as NSString
-        var current = 1
-        var offset = 0
-        while current < line && offset < text.length {
-            let lineRange = text.lineRange(for: NSRange(location: offset, length: 0))
-            offset = NSMaxRange(lineRange)
-            current += 1
-        }
-        tab.selectedRange = NSRange(location: min(offset, text.length), length: 0)
+        NotificationCenter.default.post(name: .ssmsGoToLine, object: nil,
+                                        userInfo: ["line": line, "tabID": tab.id])
     }
 }

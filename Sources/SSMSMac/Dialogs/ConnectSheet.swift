@@ -80,8 +80,14 @@ struct ConnectSheet: View {
                 profile = saved
                 password = ""
                 // Reading the keychain can block and can prompt, so it never happens
-                // inline in a view update.
-                Task { password = await app.connections.password(for: saved) ?? "" }
+                // inline in a view update. Two quick selections start two reads, and
+                // the slower one must not land in the other entry's form.
+                Task {
+                    let loaded = await app.connections.password(for: saved) ?? ""
+                    guard selectedSavedID == newValue, profile.id == newValue,
+                          password.isEmpty else { return }
+                    password = loaded
+                }
             }
         }
     }
@@ -223,7 +229,10 @@ struct ConnectSheet: View {
         if let recent = app.connections.profiles.first {
             profile = recent
             selectedSavedID = recent.id
-            password = await app.connections.password(for: recent) ?? ""
+            let loaded = await app.connections.password(for: recent) ?? ""
+            // The user may have picked another entry while the keychain was read.
+            guard selectedSavedID == recent.id, profile.id == recent.id, password.isEmpty else { return }
+            password = loaded
         } else {
             profile.server = "localhost"
             profile.username = "sa"

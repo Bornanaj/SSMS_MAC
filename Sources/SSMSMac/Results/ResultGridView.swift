@@ -219,11 +219,26 @@ struct ResultGridView: NSViewRepresentable {
         }
 
         /// The selection, or the whole result set when nothing is selected — which is
-        /// what every grid in SSMS does on Copy.
+        /// what every grid in SSMS does on Copy. The grid allows column selection too,
+        /// so selected columns narrow the slice the same way selected rows do.
         private func selectedSlice() -> (cols: [TDSColumn], rows: [[TDSValue]]) {
             let selected = tableView?.selectedRowIndexes ?? IndexSet()
             let rowIndexes = selected.isEmpty ? Array(0..<model.rows.count) : Array(selected)
-            return model.slice(rows: rowIndexes, columns: Array(0..<model.columns.count))
+            return model.slice(rows: rowIndexes, columns: selectedColumnIndexes())
+        }
+
+        /// Model column indexes of the selected table columns, or every column when
+        /// none (or only the row-number column) is selected.
+        private func selectedColumnIndexes() -> [Int] {
+            let all = Array(0..<model.columns.count)
+            guard let tableView else { return all }
+            let selected = tableView.selectedColumnIndexes.compactMap { position -> Int? in
+                guard position < tableView.tableColumns.count else { return nil }
+                let identifier = tableView.tableColumns[position].identifier.rawValue
+                guard identifier.hasPrefix("col") else { return nil }
+                return Int(identifier.dropFirst(3))
+            }
+            return selected.isEmpty ? all : selected.sorted()
         }
 
         @objc private func selectAllRows() {

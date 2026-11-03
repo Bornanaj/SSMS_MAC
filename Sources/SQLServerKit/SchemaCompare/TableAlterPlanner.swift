@@ -627,6 +627,8 @@ struct TableAlterPlanner {
         for column in computedAdds {
             columnBatches.append("ALTER TABLE \(target) ADD " + writer.columnDefinition(column))
         }
+        result.warnings.append(contentsOf: uniqueKeyWarnings(added: pairing.added, keys: uniqueAdds,
+                                                             indexes: indexAdds, table: tableName))
 
         // With filegroups ignored nothing is placed explicitly, but a unique or clustered key
         // on a partitioned table must contain the partition column; one that does not is put
@@ -803,6 +805,8 @@ struct TableAlterPlanner {
                 severity: .high, object: tableName,
                 message: "Column \(SQLIdentifier.quote(column.name)) is dropped. The data it holds will be lost."))
         }
+        result.warnings.append(contentsOf: uniqueKeyWarnings(added: pairing.added, keys: want.uniqueConstraints,
+                                                             indexes: desired.indexes, table: tableName))
 
         var batches: [String] = []
         if have.temporal?.isSystemVersioned ?? false {
@@ -981,6 +985,35 @@ struct TableAlterPlanner {
     }
 
     // MARK: - Helpers
+
+    /// A unique key over a column that is being added can hold one NULL at most, so a table
+    /// with rows makes the deployment fail, the way a NOT NULL column without a default does.
+    private func uniqueKeyWarnings(added: [ColumnDefinition], keys: [KeyConstraintDefinition],
+                                   indexes: [IndexDefinition], table: String) -> [DeploymentWarning] {
+        let nullable: Set<String> = Set(added.filter { $0.isNullable && !$0.isComputed }.map { $0.name.lowercased() })
+        guard !nullable.isEmpty else { return [] }
+        var out: [DeploymentWarning] = []
+        func warn(_ what: String, column: String) {
+            out.append(DeploymentWarning(
+                severity: .high, object: table,
+                message: "\(what) is added over the new nullable column \(SQLIdentifier.quote(column)). Every "
+                + "existing row gets NULL there, so the deployment fails if the table holds more than one row."))
+        }
+        for key in keys {
+            for column in key.columns where nullable.contains(column.name.lowercased()) {
+                warn(key.name.isEmpty ? "A unique constraint" : "Unique constraint \(SQLIdentifier.quote(key.name))",
+                     column: column.name)
+            }
+        }
+        for index in indexes where index.isUnique {
+            for column in index.columns where nullable.contains(column.name.lowercased()) {
+                // A filter naming the column (WHERE col IS NOT NULL) is the usual way around it.
+                if let filter = index.filter, references(filter, [column.name.lowercased()]) { continue }
+                warn("Unique index \(SQLIdentifier.quote(index.name))", column: column.name)
+            }
+        }
+        return out
+    }
 
     private func alterColumnDefinition(_ column: ColumnDefinition) -> String {
         var text = SQLIdentifier.quote(column.name) + " " + column.dataType

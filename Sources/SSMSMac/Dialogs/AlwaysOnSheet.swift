@@ -172,18 +172,7 @@ struct AlwaysOnSheet: View {
 
             Button {
                 guard let database = selectedDatabase else { return }
-                let script: String
-                if database.isSuspended {
-                    script = (try? AvailabilityGroupScripts.resumeDataMovement(
-                        database: database.databaseName)) ?? ""
-                } else {
-                    script = (try? AvailabilityGroupScripts.suspendDataMovement(
-                        database: database.databaseName)) ?? ""
-                }
-                pendingScript = PendingScript(
-                    title: database.isSuspended ? "Resume data movement" : "Suspend data movement",
-                    script: runHereNote(replica: database.replicaServerName) + script,
-                    destructive: !database.isSuspended)
+                suspendOrResume(database)
             } label: {
                 Label(selectedDatabase?.isSuspended == true ? "Resume" : "Suspend",
                       systemImage: selectedDatabase?.isSuspended == true
@@ -195,6 +184,8 @@ struct AlwaysOnSheet: View {
 
             Menu {
                 Button("Add Database…") { showAddDatabase = true }
+                    .disabled(!isConnectedToPrimary)
+                    .help(isConnectedToPrimary ? "" : "Open the dashboard on the primary replica to add a database.")
                 Button("Remove Database…") { removeDatabase() }
                     .disabled(selectedDatabase == nil)
                 Divider()
@@ -591,14 +582,64 @@ struct AlwaysOnSheet: View {
                                       script: script, destructive: true)
     }
 
+    /// `SET HADR SUSPEND` / `RESUME` acts on the replica it runs on: run on the primary
+    /// it suspends data movement to every secondary. The step is therefore pinned to
+    /// the replica the selected row belongs to and carried out through a plan, rather
+    /// than run on whichever instance the dashboard happens to be connected to.
+    private func suspendOrResume(_ database: AvailabilityDatabaseState) {
+        let resume = database.isSuspended
+        do {
+            let script = resume
+                ? try AvailabilityGroupScripts.resumeDataMovement(database: database.databaseName)
+                : try AvailabilityGroupScripts.suspendDataMovement(database: database.databaseName)
+            let replica = database.replicaServerName.isEmpty
+                ? server.serverInfo.serverName : database.replicaServerName
+            let step = ScriptStep(
+                title: "\(resume ? "Resume" : "Suspend") \(database.databaseName) on \(replica)",
+                instance: replica,
+                script: script,
+                detail: resume
+                    ? "Data movement resumes on the replica that is suspended, not on the primary."
+                    : "Suspending on a secondary stops only that replica; on the primary it "
+                      + "stops data movement to every secondary.")
+            let plan = ScriptPlan(
+                title: resume ? "Resume data movement" : "Suspend data movement",
+                summary: "\(database.databaseName) in \(database.groupName), on \(replica).",
+                steps: [step])
+            pendingPlan = ScriptPlanLaunch(plan: plan, server: server)
+        } catch {
+            isError = true
+            status = String(describing: error)
+        }
+    }
+
+    /// Adding a database lists candidates on, and joins through, the primary.
+    private var isConnectedToPrimary: Bool {
+        guard let group, !group.primaryReplica.isEmpty else { return true }
+        return group.primaryReplica.caseInsensitiveCompare(server.serverInfo.serverName) == .orderedSame
+    }
+
+    /// REMOVE REPLICA only works on the primary, so the step is pinned there.
     private func removeReplica() {
         guard let group, let replica = selectedReplica else { return }
-        guard let script = try? AvailabilityGroupScripts.removeReplica(
-            group: group.name, replicaServerName: replica.serverName) else { return }
-        pendingScript = PendingScript(
-            title: "Remove replica \(replica.serverName)",
-            script: runHereNote(replica: group.primaryReplica) + script,
-            destructive: true)
+        do {
+            let script = try AvailabilityGroupScripts.removeReplica(
+                group: group.name, replicaServerName: replica.serverName)
+            let primary = group.primaryReplica.isEmpty
+                ? server.serverInfo.serverName : group.primaryReplica
+            let step = ScriptStep(
+                title: "Remove \(replica.serverName) from \(group.name)",
+                instance: primary,
+                script: script,
+                detail: "ALTER AVAILABILITY GROUP … REMOVE REPLICA runs on the primary replica.")
+            let plan = ScriptPlan(title: "Remove replica \(replica.serverName)",
+                                  summary: "Removes \(replica.serverName) from \(group.name), on the primary \(primary).",
+                                  steps: [step])
+            pendingPlan = ScriptPlanLaunch(plan: plan, server: server)
+        } catch {
+            isError = true
+            status = String(describing: error)
+        }
     }
 
     private func removeListener() {

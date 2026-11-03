@@ -108,6 +108,28 @@ final class QueryTab: ObservableObject, Identifiable {
     var timeoutSeconds: Int = 0
     var setOptions = QuerySetOptions()
 
+    /// How Results to Text renders rows, applied app-wide from Query Options.
+    var textResultPreferences = QueryResultsPreferences.load() {
+        didSet { cachedTextOutput = nil }
+    }
+    private var cachedTextOutput: String?
+    /// Lines to add to the server's line numbers when the run was a selection, so the
+    /// gutter and "go to line" point at the document line rather than the selection's.
+    private var executionLineOffset = 0
+
+    // MARK: - Editor state
+
+    /// Undo history is per window in SSMS, so each tab has its own manager: Cmd+Z in
+    /// one window never rewrites another.
+    let undoManager = UndoManager()
+    /// 1-based bookmarked lines.
+    var bookmarks: Set<Int> = []
+    /// The AppKit editor built for this tab. SwiftUI rebuilds its wrapper whenever the
+    /// window re-arranges itself (switching tabs, hiding the results pane); keeping the
+    /// view here is what preserves the undo history, the caret and the scroll position.
+    var editorTextView: SQLTextView?
+    var editorScrollOrigin: NSPoint = .zero
+
     init(title: String = "SQLQuery1.sql", text: String = "") {
         self.title = title
         self.text = text
@@ -116,24 +138,12 @@ final class QueryTab: ObservableObject, Identifiable {
     var isConnected: Bool { connection != nil && !(connection?.isClosed ?? true) }
 
     var lineCount: Int {
-        let ns = text as NSString
-        var count = 0
-        ns.enumerateSubstrings(in: NSRange(location: 0, length: ns.length),
-                               options: [.byLines, .substringNotRequired]) { _, _, _, _ in
-            count += 1
-        }
-        return max(1, count)
+        TextLines.count(in: text as NSString)
     }
 
+    /// 1-based line holding the caret.
     var currentLine: Int {
-        let ns = text as NSString
-        let caret = min(selectedRange.location, ns.length)
-        var line = 1
-        ns.enumerateSubstrings(in: NSRange(location: 0, length: caret),
-                               options: [.byLines, .substringNotRequired]) { _, _, _, _ in
-            line += 1
-        }
-        return line
+        TextLines.line(at: selectedRange.location, in: text as NSString)
     }
 
     var displayTitle: String {
@@ -142,11 +152,15 @@ final class QueryTab: ObservableObject, Identifiable {
     }
 
     /// The text that F5 should run: the selection when there is one, otherwise everything.
-    var textToExecute: String {
-        guard selectedRange.length > 0 else { return text }
+    var textToExecute: String { scriptToExecute().script }
+
+    /// The script to run and the 1-based document line it starts on.
+    private func scriptToExecute() -> (script: String, startLine: Int) {
         let ns = text as NSString
-        guard selectedRange.location + selectedRange.length <= ns.length else { return text }
-        return ns.substring(with: selectedRange)
+        guard selectedRange.length > 0, NSMaxRange(selectedRange) <= ns.length else {
+            return (text, 1)
+        }
+        return (ns.substring(with: selectedRange), TextLines.line(at: selectedRange.location, in: ns))
     }
 
     // MARK: - Connection
@@ -165,6 +179,10 @@ final class QueryTab: ObservableObject, Identifiable {
         self.serverLabel = info.serverName
         self.accentColorHex = session.profile.colorHex
         let target = database ?? info.currentDatabase
+        // The connect dialog's own execution timeout wins over the global preference.
+        if session.profile.executionTimeoutSeconds > 0 {
+            timeoutSeconds = session.profile.executionTimeoutSeconds
+        }
 
         do {
             let connection = try await session.openConnection(database: target)
@@ -311,10 +329,11 @@ final class QueryTab: ObservableObject, Identifiable {
             appendLocalError("This query window is not connected to a server.")
             return
         }
-        let script = textToExecute
+        let (script, startLine) = scriptToExecute()
         guard !script.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
 
         clearResults()
+        executionLineOffset = startLine - 1
         executedScript = script
         executionStartedAt = Date()
         isExecuting = true
@@ -377,6 +396,10 @@ final class QueryTab: ObservableObject, Identifiable {
             resultsByID[id]?.finish(rowCount: rowCount, truncated: truncated, elapsed: elapsed)
 
         case .message(let message):
+            var message = message
+            // Server line numbers are relative to what was sent, which may have been a
+            // selection part way down the document.
+            if message.scriptLine > 0 { message.scriptLine += executionLineOffset }
             messages.append(message)
             if message.kind == .error && selectedPaneTab == .results && resultSets.isEmpty {
                 selectedPaneTab = .messages
@@ -405,6 +428,7 @@ final class QueryTab: ObservableObject, Identifiable {
 
     private func finishExecution() {
         isExecuting = false
+        cachedTextOutput = nil
         stopTimer()
         stopLiveStatistics()
         recordHistory()
@@ -508,12 +532,38 @@ final class QueryTab: ObservableObject, Identifiable {
         executionPlanXML = nil
         summary = nil
         elapsed = 0
+        cachedTextOutput = nil
     }
 
     private func appendLocalError(_ text: String) {
         messages.append(SQLMessage(kind: .error, text: text))
+        cachedTextOutput = nil
         selectedPaneTab = .messages
         showResultsPane = true
+    }
+
+    // MARK: - Results to Text
+
+    /// SSMS's "Results to Text": every result set as fixed-width columns followed by
+    /// the messages, the way sqlcmd prints them. Formatted once per run and cached, so
+    /// a keystroke in the editor does not re-render every row.
+    var textOutput: String {
+        if let cachedTextOutput { return cachedTextOutput }
+        let formatter = TextResultFormatter(style: textResultPreferences.textStyle)
+        var blocks: [String] = []
+        for model in resultSets {
+            blocks.append(formatter.format(columns: model.columns, rows: model.rows))
+            blocks.append(formatter.rowsAffected(Int64(model.rowCount)))
+        }
+        for message in messages where message.kind == .info {
+            blocks.append(message.text)
+        }
+        for message in messages where message.kind == .error {
+            blocks.append(message.displayText)
+        }
+        let output = blocks.joined(separator: "\n")
+        cachedTextOutput = output
+        return output
     }
 
     private func startTimer() {

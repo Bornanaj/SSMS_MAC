@@ -214,9 +214,13 @@ public struct QueryStoreService: Sendable {
 
     // MARK: Settings
 
-    public func options(database: String) async throws -> QueryStoreOptions {
-        try await requireQueryStore()
-        let sql = """
+    /// The settings query, built for one engine version: `wait_stats_capture_mode_desc`
+    /// arrived in 2017, and asking 2016 for it fails the whole query.
+    public static func optionsQuery(_ info: ServerInfo) -> String {
+        let waitStats = info.majorVersion >= 14 || info.isAzure
+            ? "ISNULL(o.wait_stats_capture_mode_desc, N'')"
+            : "N''"
+        return """
         SELECT
             ISNULL(o.actual_state_desc, N'OFF')                       AS ActualState,
             ISNULL(o.desired_state_desc, N'OFF')                      AS DesiredState,
@@ -227,9 +231,14 @@ public struct QueryStoreService: Sendable {
             CAST(ISNULL(o.stale_query_threshold_days, 0) AS int)      AS StaleDays,
             CAST(ISNULL(o.interval_length_minutes, 0) AS int)         AS IntervalMinutes,
             CAST(ISNULL(o.max_plans_per_query, 0) AS int)             AS MaxPlans,
-            ISNULL(o.wait_stats_capture_mode_desc, N'')               AS WaitStatsMode
+            \(waitStats) AS WaitStatsMode
         FROM sys.database_query_store_options AS o
         """
+    }
+
+    public func options(database: String) async throws -> QueryStoreOptions {
+        try await requireQueryStore()
+        let sql = QueryStoreService.optionsQuery(await session.serverInfo)
         let result = try await session.metadataQuery(sql, database: database)
         if let failure = result.errors.first { throw failure }
         guard let row = result.resultSets.first?.dictionaries().first else {

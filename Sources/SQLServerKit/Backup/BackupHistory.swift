@@ -333,6 +333,17 @@ public struct BackupSetInfo: Identifiable, Hashable, Sendable {
     public var isURL: Bool { deviceType == 9 || (files.first?.first?.lowercased().hasPrefix("http") ?? false)
         || (files.first?.first?.lowercased().hasPrefix("s3://") ?? false) }
 
+    /// Written to the NUL pseudo-device, as the compression analyzer does: msdb records the set
+    /// like any other, but there is no file to restore from.
+    public var isNullDevice: Bool {
+        files.contains { mirror in
+            mirror.contains { file in
+                let name = file.trimmingCharacters(in: .whitespaces).uppercased()
+                return name == "NUL" || name == "NUL:"
+            }
+        }
+    }
+
     /// The stripes of the first complete mirror.
     public var primaryFiles: [String] { files.first ?? [] }
 
@@ -579,7 +590,8 @@ public struct BackupHistoryReader: Sendable {
 
     // MARK: Backup sets
 
-    /// Every backup set of a database recorded on this server, oldest first.
+    /// Every backup set of a database recorded on this server, oldest first, except those
+    /// written to the NUL device (see `BackupSetInfo.isNullDevice`), which cannot be restored.
     public func backupSets(database: String) async throws -> [BackupSetInfo] {
         let major = await majorVersion
         let key = major >= 12 ? "ISNULL(bs.key_algorithm, N'')" : "N''"
@@ -646,7 +658,7 @@ public struct BackupHistoryReader: Sendable {
             let mirrors = filesByMedia[media] ?? [:]
             info.files = mirrors.keys.sorted().compactMap { mirrors[$0] }
             return info
-        }
+        }.filter { !$0.isNullDevice }
     }
 
     /// Database names that have backup history on this server.

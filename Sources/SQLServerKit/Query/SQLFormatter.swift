@@ -122,7 +122,19 @@ public struct SQLFormatter: Sendable {
 
             if isWord, upper == "GO" {
                 newline()
-                output += "GO\n"
+                var separator = "GO"
+                // `GO 5` repeats the batch; the count has to stay on the GO line, or the
+                // batch splitter hands "5" to the next batch as T-SQL.
+                var look = index + 1
+                while look < tokens.count, tokens[look].kind == .whitespace,
+                      !tokens[look].text.contains("\n") {
+                    look += 1
+                }
+                if look < tokens.count, tokens[look].kind == .number {
+                    separator += " " + tokens[look].text
+                    index = look
+                }
+                output += separator + "\n"
                 atLineStart = true
                 indent = 0
                 parenDepth = 0
@@ -137,7 +149,7 @@ public struct SQLFormatter: Sendable {
                 inSelectList = false
                 newline()
                 indentLine()
-                emit(cased(token), spaceBefore: false)
+                emit(cased(token, after: previous, next: index + 1 < tokens.count ? tokens[index + 1] : nil), spaceBefore: false)
                 index += 1
                 previous = token
                 continue
@@ -147,7 +159,7 @@ public struct SQLFormatter: Sendable {
                 if upper == "END" { indent = max(0, indent - 1) }
                 newline()
                 indentLine()
-                emit(cased(token), spaceBefore: false)
+                emit(cased(token, after: previous, next: index + 1 < tokens.count ? tokens[index + 1] : nil), spaceBefore: false)
                 if upper == "BEGIN" { indent += 1 }
                 inSelectList = (upper == "SELECT")
                 index += 1
@@ -158,7 +170,7 @@ public struct SQLFormatter: Sendable {
             if isWord, SQLFormatter.continuations.contains(upper), parenDepth == 0 {
                 newline()
                 indentLine(extra: 1)
-                emit(cased(token), spaceBefore: false)
+                emit(cased(token, after: previous, next: index + 1 < tokens.count ? tokens[index + 1] : nil), spaceBefore: false)
                 index += 1
                 previous = token
                 continue
@@ -201,7 +213,7 @@ public struct SQLFormatter: Sendable {
             // A dot binds tightly on both sides: schema.table.column
             let tightLeft = previous?.kind == .punctuation && previous?.text == "."
                 || previous?.kind == .op && previous?.text == "."
-            emit(cased(token), spaceBefore: !tightLeft)
+            emit(cased(token, after: previous, next: index + 1 < tokens.count ? tokens[index + 1] : nil), spaceBefore: !tightLeft)
             index += 1
             previous = token
         }
@@ -226,9 +238,32 @@ public struct SQLFormatter: Sendable {
         }
     }
 
-    private func cased(_ token: TSQLToken) -> String {
-        guard token.kind == .keyword || token.kind == .dataType || token.kind == .builtInFunction
-        else { return token.text }
+    /// Only words that are certainly keywords change case. The lexer classifies by word
+    /// list, so a column called `Date`, `Year`, `Key` or `Count` lexes as a type or a
+    /// function; re-casing it breaks the query under a case-sensitive collation.
+    private func cased(_ token: TSQLToken, after previous: TSQLToken?, next: TSQLToken?) -> String {
+        // After a dot the word is always a schema, table or column name.
+        if let previous, previous.text == ".",
+           previous.kind == .punctuation || previous.kind == .op {
+            return token.text
+        }
+        switch token.kind {
+        case .keyword:
+            break
+        case .builtInFunction:
+            // A function is only a function when it is called.
+            guard next?.text == "(" else { return token.text }
+        case .dataType:
+            // A type name follows AS, an opening parenthesis or a variable, or opens its
+            // own length: `CAST(x AS int)`, `CONVERT(date, x)`, `DECLARE @d datetime`,
+            // `varchar(50)`. Anywhere else it is more likely a column called Date.
+            let previousWord = previous?.text.uppercased()
+            let introduces = previousWord == "AS" || previousWord == "("
+                || previous?.kind == .variable || next?.text == "("
+            guard introduces else { return token.text }
+        default:
+            return token.text
+        }
         switch style.keywordCase {
         case .upper: return token.text.uppercased()
         case .lower: return token.text.lowercased()

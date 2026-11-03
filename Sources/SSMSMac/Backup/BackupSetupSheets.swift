@@ -55,7 +55,13 @@ struct LogShippingSheet: View {
             standbyProfile = window.profile
             standbySession = session
             standbyCapabilities = capabilities
-            options.primaryDatabase = window.selectedDatabase ?? ""
+            // Only a database the picker lists can be preselected: a SIMPLE or system
+            // database would leave the picker blank with the wizard still able to go on.
+            if let selected = window.selectedDatabase,
+               window.databases.contains(where: { $0.name == selected && !$0.isSystem
+                   && $0.recoveryModel.uppercased() != "SIMPLE" && $0.operationalState == .operational }) {
+                options.primaryDatabase = selected
+            }
             options.backupFolder = capabilities.join(capabilities.backupFolder, "LogShipping")
             options.backupShare = options.backupFolder
             options.copyFolder = capabilities.join(capabilities.backupFolder, "LogShippingCopy")
@@ -290,6 +296,7 @@ struct BackupFileOptionsTab: View {
     @State private var compressionDefault = false
     @State private var checksumDefault = false
     @State private var historyDays = 180
+    @State private var confirmDeleteHistory = false
     @State private var testFolder = ""
 
     var body: some View {
@@ -323,7 +330,17 @@ struct BackupFileOptionsTab: View {
                 Stepper("Activity History shows the last \(preferences.historyDays) days", value: $preferences.historyDays, in: 1...3650)
                 HStack {
                     Stepper("Delete backup and restore history older than \(historyDays) days", value: $historyDays, in: 7...3650)
-                    Button("Delete Now") { deleteHistory() }
+                    Button("Delete Now…") { confirmDeleteHistory = true }
+                        .confirmationDialog(
+                            "Delete backup and restore history older than \(historyDays) days?",
+                            isPresented: $confirmDeleteHistory, titleVisibility: .visible) {
+                            Button("Delete History", role: .destructive) { deleteHistory() }
+                            Button("Cancel", role: .cancel) {}
+                        } message: {
+                            Text("The backup files stay on disk, but the wizard builds restore "
+                                 + "chains from this history: older backups can no longer be "
+                                 + "restored from here. This cannot be undone.")
+                        }
                 }
                 Text("Runs msdb.dbo.sp_delete_backuphistory; the backup files themselves are kept.")
                     .font(.caption).foregroundStyle(.secondary)

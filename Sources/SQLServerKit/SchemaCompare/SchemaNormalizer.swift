@@ -41,7 +41,10 @@ public struct SchemaNormalizer: Sendable {
             for index in object.triggers.indices { object.triggers[index].order = [:] }
         }
         if options.ignoreIndexes {
+            // The option covers keys as well as indexes, as its description says.
             object.indexes = []
+            object.table?.primaryKey = nil
+            object.table?.uniqueConstraints = []
         } else if options.ignorePerformanceIndexes {
             object.indexes.removeAll { $0.kind == .nonclustered && !$0.isUnique }
         }
@@ -53,16 +56,20 @@ public struct SchemaNormalizer: Sendable {
             prepare(&table)
             object.table = table
         }
+        if options.ignoreCollations, object.type == .tableType {
+            object.body = Self.withoutCollations(object.body)
+        }
         return object
     }
 
     private func prepare(_ table: inout TableDefinition) {
         for index in table.columns.indices {
             var column = table.columns[index]
-            if options.ignoreCollations {
+            if options.ignoreCollations || column.isUserDefinedType {
+                // An alias type's collation is the type's own; it cannot be set on the column.
                 column.collation = nil
             } else if column.collation == nil, !column.isComputed, SchemaTypes.isCharacter(column.dataType),
-                      !column.isUserDefinedType, !defaultCollation.isEmpty {
+                      !defaultCollation.isEmpty {
                 column.collation = defaultCollation
             }
             if options.ignoreDynamicDataMasking { column.maskingFunction = nil }
@@ -89,7 +96,10 @@ public struct SchemaNormalizer: Sendable {
             table.changeTracking = false
             table.changeTrackingColumnsUpdated = false
         }
-        if options.ignoreDataCompression { table.dataCompression = "NONE" }
+        if options.ignoreDataCompression || table.dataCompression.uppercased().hasPrefix("COLUMNSTORE") {
+            // Columnstore compression is the clustered columnstore index's, and is compared there.
+            table.dataCompression = "NONE"
+        }
         if table.textImageDataSpace == nil, !table.isMemoryOptimized,
                   table.columns.contains(where: { SchemaTypes.isLargeObject($0.dataType) && !$0.isComputed }) {
             // SQL Server always records a LOB filegroup for tables with LOB columns, whether or
@@ -102,8 +112,22 @@ public struct SchemaNormalizer: Sendable {
         kind == .clusteredColumnstore || kind == .nonclusteredColumnstore
     }
 
+    /// Catalog-built text without its `COLLATE name` clauses (table type bodies).
+    static func withoutCollations(_ text: String) -> String {
+        text.replacingOccurrences(of: #"\s+COLLATE\s+[A-Za-z0-9_]+"#, with: "",
+                                  options: [.regularExpression, .caseInsensitive])
+    }
+
     private func preparedOptions(_ input: IndexOptions, isColumnstore: Bool) -> IndexOptions {
         var value = input
+        if isColumnstore {
+            // sys.indexes reports locks off and no fill factor for a columnstore index; none of
+            // them can be set on one, so they are not properties to compare or script.
+            value.allowRowLocks = true
+            value.allowPageLocks = true
+            value.fillFactor = 0
+            value.padIndex = false
+        }
         if options.ignoreFillFactorAndIndexPadding {
             value.fillFactor = 0
             value.padIndex = false

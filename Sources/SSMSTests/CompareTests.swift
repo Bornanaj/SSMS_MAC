@@ -19,6 +19,10 @@ func runCompareTests(_ t: TestRunner) {
         comparison.differences.first { $0.displayName.caseInsensitiveCompare(name) == .orderedSame }
     }
 
+    func snapshotObject(_ snapshot: SchemaSnapshot, _ name: String) -> SchemaObject? {
+        snapshot.objects.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }
+    }
+
     let sourceScript = """
     CREATE SCHEMA [Sales] AUTHORIZATION [dbo]
     GO
@@ -387,5 +391,285 @@ func runCompareTests(_ t: TestRunner) {
         let partial = DataSyncScripter(comparison: comparison, options: noDeletes).plan()
         t.equal(partial.totalDeletes, 0, "deletes can be switched off")
         t.expect(!partial.script.contains("NOCHECK"), "foreign keys stay on when asked")
+    }
+
+    // MARK: - Regressions
+
+    t.suite("parser regressions") {
+        // An inline PRIMARY KEY / UNIQUE must not swallow the column attributes written after it.
+        let inline = snapshot("""
+        CREATE TABLE [dbo].[InlineKeys] (
+            [Id] int NOT NULL PRIMARY KEY IDENTITY(1,1),
+            [Guid] uniqueidentifier NOT NULL UNIQUE ROWGUIDCOL,
+            [Code] nvarchar(10) UNIQUE NONCLUSTERED WITH (FILLFACTOR = 80) ON [PRIMARY] SPARSE NULL,
+            [Email] nvarchar(200) UNIQUE MASKED WITH (FUNCTION = 'email()') NOT NULL
+        )
+        GO
+        """, origin: "Inline")
+        let inlineTable = snapshotObject(inline, "InlineKeys")?.table
+        t.expect(inlineTable?.column(named: "Id")?.identity != nil, "IDENTITY after an inline PRIMARY KEY is kept")
+        t.equal(inlineTable?.column(named: "Id")?.isNullable, false, "inline key column stays NOT NULL")
+        t.equal(inlineTable?.primaryKey?.columns.map(\.name) ?? [], ["Id"], "inline primary key column")
+        t.equal(inlineTable?.column(named: "Guid")?.isRowGuidCol, true, "ROWGUIDCOL after an inline UNIQUE is kept")
+        t.equal(inlineTable?.column(named: "Code")?.isSparse, true, "SPARSE after an inline UNIQUE with options is kept")
+        t.equal(inlineTable?.column(named: "Code")?.isNullable, true, "nullability after an inline UNIQUE is kept")
+        t.equal(inlineTable?.column(named: "Email")?.maskingFunction, "email()", "MASKED WITH after an inline UNIQUE is kept")
+        t.equal(inlineTable?.column(named: "Email")?.isNullable, false, "NOT NULL after a masked inline UNIQUE is kept")
+        t.equal(inlineTable?.uniqueConstraints.count, 3, "three unique constraints")
+        t.equal(inlineTable?.uniqueConstraints.first { $0.columns.first?.name == "Code" }?.options.fillFactor, 80,
+                "inline unique constraint options")
+
+        // PRIMARY not followed by KEY used to loop forever appending unique constraints.
+        let stray = snapshot("""
+        CREATE TABLE [dbo].[Stray] ([Id] int NOT NULL, [C] int NULL INDEX [IX_C] NONCLUSTERED ON PRIMARY)
+        GO
+        """, origin: "Stray")
+        let strayObject = snapshotObject(stray, "Stray")
+        t.equal(strayObject?.table?.columns.count, 2, "stray PRIMARY still yields both columns")
+        t.equal(strayObject?.table?.uniqueConstraints.count, 0, "stray PRIMARY adds no unique constraint")
+        t.equal(strayObject?.indexes.map(\.name) ?? [], ["IX_C"], "inline INDEX is kept")
+
+        // DEFAULT without parentheses: NULL, literals and function calls.
+        let defaults = snapshot("""
+        CREATE TABLE [dbo].[Defaults] (
+            [N] int NULL DEFAULT NULL,
+            [Z] int NOT NULL DEFAULT 0,
+            [D] datetime NOT NULL CONSTRAINT [DF_D] DEFAULT GETDATE(),
+            [X] nvarchar(10) NULL DEFAULT N'x',
+            [P] int NOT NULL DEFAULT (1)
+        )
+        GO
+        """, origin: "Defaults")
+        let defaultsObject = snapshotObject(defaults, "Defaults")
+        func defaultExpression(_ column: String) -> String {
+            ModuleText.expression(defaultsObject?.table?.column(named: column)?.defaultConstraint?.definition ?? "<none>")
+        }
+        t.equal(defaultExpression("N"), "null", "DEFAULT NULL")
+        t.equal(defaultsObject?.table?.column(named: "N")?.isNullable, true, "DEFAULT NULL leaves the column nullable")
+        t.equal(defaultExpression("Z"), "0", "DEFAULT 0")
+        t.equal(defaultExpression("D"), ModuleText.expression("GETDATE()"), "DEFAULT GETDATE()")
+        t.equal(defaultsObject?.table?.column(named: "D")?.defaultConstraint?.name, "DF_D", "named bare default")
+        t.equal(defaultExpression("X"), ModuleText.expression("N'x'"), "DEFAULT N'x'")
+        t.equal(defaultExpression("P"), "1", "DEFAULT (1)")
+        if let defaultsObject {
+            let scripted = SchemaScriptWriter().script(for: defaultsObject)
+            t.expect(scripted.contains("DEFAULT (NULL)") && !scripted.contains("DEFAULT ()"),
+                     "NULL default scripts as (NULL)", scripted)
+        }
+
+        // SET ANSI_NULLS, QUOTED_IDENTIFIER ON names several options at once.
+        let settings = snapshot("""
+        SET ANSI_NULLS, QUOTED_IDENTIFIER ON
+        GO
+        CREATE PROCEDURE [dbo].[Both] AS SELECT 1
+        GO
+        SET ANSI_NULLS, QUOTED_IDENTIFIER OFF
+        GO
+        CREATE PROCEDURE [dbo].[Neither] AS SELECT 1
+        GO
+        SET QUOTED_IDENTIFIER OFF
+        GO
+        SET ANSI_NULLS ON
+        GO
+        CREATE PROCEDURE [dbo].[Mixed] AS SELECT 1
+        GO
+        """, origin: "Settings")
+        let both = snapshotObject(settings, "Both")
+        let neither = snapshotObject(settings, "Neither")
+        let mixed = snapshotObject(settings, "Mixed")
+        t.expect(both?.usesAnsiNulls == true && both?.usesQuotedIdentifier == true, "SET a, b ON sets both")
+        t.expect(neither?.usesAnsiNulls == false && neither?.usesQuotedIdentifier == false, "SET a, b OFF clears both")
+        t.expect(mixed?.usesAnsiNulls == true && mixed?.usesQuotedIdentifier == false, "single SET statements still apply")
+
+        // GRANT CREATE TABLE is one statement, not GRANT + CREATE.
+        let granted = snapshot("""
+        CREATE ROLE [app_role] AUTHORIZATION [dbo]
+        GO
+        GRANT CREATE TABLE, CREATE VIEW TO [app_role]
+        GO
+        DENY CREATE PROCEDURE TO [app_role]
+        GO
+        """, origin: "Granted")
+        let role = granted.objects.first { $0.type == .role }
+        let rolePermissions = Set(role?.permissions.map { "\($0.state) \($0.permission)" } ?? [])
+        t.expect(rolePermissions.contains("GRANT CREATE TABLE") && rolePermissions.contains("GRANT CREATE VIEW")
+                 && rolePermissions.contains("DENY CREATE PROCEDURE"), "database-level CREATE permissions are read",
+                 rolePermissions.sorted().joined(separator: ", "))
+        t.expect(granted.warnings.isEmpty, "no warning for GRANT CREATE", granted.warnings.joined(separator: "; "))
+
+        // A module keeps its final semicolon, so it compares equal to the live definition.
+        let ending = snapshot("""
+        CREATE PROCEDURE [dbo].[Ends] AS
+        BEGIN
+            SELECT 1
+        END;
+        GO
+        CREATE ASSEMBLY [Asm] FROM 0x4D5A;
+        GO
+        """, origin: "Ending")
+        let ends = snapshotObject(ending, "Ends")
+        t.expect(ends?.body.hasSuffix("END;") ?? false, "module body keeps its trailing semicolon", ends?.body ?? "")
+        t.expect(!(snapshotObject(ending, "Asm")?.body.hasSuffix(";") ?? true),
+                 "other statements still lose the trailing semicolon")
+        let liveEnds = SchemaObject(type: .storedProcedure, schema: "dbo", name: "Ends",
+                                    body: "CREATE PROCEDURE [dbo].[Ends] AS\nBEGIN\n    SELECT 1\nEND;\n", subtype: "P")
+        let liveEnding = SchemaSnapshot(origin: "Live", defaultCollation: "SQL_Latin1_General_CP1_CI_AS", objects: [liveEnds])
+        t.equal(difference(SchemaComparer().compare(source: ending, target: liveEnding), "dbo.Ends")?.status, .identical,
+                "scripted END; equals the live END;")
+        let rewritten = snapshot(SchemaScriptWriter().script(for: liveEnds), origin: "Rewritten")
+        t.equal(difference(SchemaComparer().compare(source: rewritten, target: liveEnding), "dbo.Ends")?.status, .identical,
+                "a scripts folder written from the database reads back identical")
+    }
+
+    t.suite("normalizer regressions") {
+        let defaultCollation = "SQL_Latin1_General_CP1_CI_AS"
+        let writer = SchemaScriptWriter()
+
+        // Alias-type columns never get a COLLATE clause (Msg 452), even from older snapshots.
+        var phone = ColumnDefinition(name: "Phone", dataType: "[dbo].[Phone]", isUserDefinedType: true, isNullable: true)
+        phone.collation = defaultCollation
+        t.equal(writer.columnDefinition(phone), "[Phone] [dbo].[Phone] NULL", "no COLLATE on a user-defined type")
+        var contacts = SchemaObject(type: .table, schema: "dbo", name: "Contacts")
+        contacts.table = TableDefinition(columns: [phone])
+        let scriptedContacts = snapshot("""
+        CREATE TYPE [dbo].[Phone] FROM varchar(20) NULL
+        GO
+        CREATE TABLE [dbo].[Contacts] ([Phone] [dbo].[Phone] NULL)
+        GO
+        """, origin: "Scripted")
+        let liveContacts = SchemaSnapshot(origin: "Live", defaultCollation: defaultCollation, objects: [contacts])
+        t.equal(difference(SchemaComparer().compare(source: scriptedContacts, target: liveContacts), "dbo.Contacts")?.status,
+                .identical, "a stored collation on an alias-type column is not a difference")
+
+        // Columnstore indexes: the catalog reports lock options off; they are not real options.
+        var columnstoreOptions = IndexOptions()
+        columnstoreOptions.allowRowLocks = false
+        columnstoreOptions.allowPageLocks = false
+        columnstoreOptions.dataCompression = "COLUMNSTORE"
+        var columnstore = SchemaObject(type: .table, schema: "dbo", name: "Cs")
+        columnstore.table = TableDefinition(columns: [ColumnDefinition(name: "Id", dataType: "int", isNullable: false),
+                                                     ColumnDefinition(name: "V", dataType: "nvarchar(50)", isNullable: true)],
+                                            dataCompression: "COLUMNSTORE")
+        columnstore.indexes = [
+            IndexDefinition(name: "CCI_Cs", kind: .clusteredColumnstore, columns: [], options: columnstoreOptions),
+            IndexDefinition(name: "NCI_Cs", kind: .nonclusteredColumnstore, columns: [], includedColumns: ["V"],
+                            options: columnstoreOptions)
+        ]
+        let scriptedColumnstore = snapshot("""
+        CREATE TABLE [dbo].[Cs] ([Id] int NOT NULL, [V] nvarchar(50) NULL)
+        GO
+        CREATE CLUSTERED COLUMNSTORE INDEX [CCI_Cs] ON [dbo].[Cs]
+        GO
+        CREATE NONCLUSTERED COLUMNSTORE INDEX [NCI_Cs] ON [dbo].[Cs] ([V])
+        GO
+        """, origin: "Scripted")
+        let liveColumnstore = SchemaSnapshot(origin: "Live", defaultCollation: defaultCollation, objects: [columnstore])
+        let columnstoreComparison = SchemaComparer().compare(source: scriptedColumnstore, target: liveColumnstore)
+        t.equal(difference(columnstoreComparison, "dbo.Cs")?.status, .identical,
+                "columnstore lock options and table compression do not count")
+        let create = writer.createTableStatement(columnstore, name: "[dbo].[Cs]")
+        t.expect(!create.contains("DATA_COMPRESSION"), "CREATE TABLE never asks for columnstore compression", create)
+
+        // Spatial indexes script their column and tessellation, or a comment, never "()".
+        var spatial = IndexDefinition(name: "SIX_Geo", kind: .spatial, columns: [IndexColumn(name: "Shape")], dataSpace: "")
+        spatial.spatialTessellation = "GEOMETRY_GRID"
+        spatial.spatialBoundingBox = "BOUNDING_BOX = (0, 0, 500, 200), GRIDS = (LEVEL_1 = MEDIUM, LEVEL_2 = MEDIUM, "
+            + "LEVEL_3 = MEDIUM, LEVEL_4 = MEDIUM), CELLS_PER_OBJECT = 16"
+        let spatialStatement = writer.createIndexStatement(spatial, on: "[dbo].[Geo]")
+        t.expect(spatialStatement.hasPrefix("CREATE SPATIAL INDEX [SIX_Geo] ON [dbo].[Geo] ([Shape]) USING GEOMETRY_GRID "
+                                            + "WITH (BOUNDING_BOX = (0, 0, 500, 200), GRIDS = ("),
+                 "spatial index scripts its column, tessellation and options", spatialStatement)
+        let blank = IndexDefinition(name: "SIX_Blank", kind: .spatial, columns: [], dataSpace: "")
+        let blankStatement = writer.createIndexStatement(blank, on: "[dbo].[Geo]")
+        t.expect(!blankStatement.contains("()") && blankStatement.hasPrefix("/*"),
+                 "a spatial index without a column becomes a comment, not invalid SQL", blankStatement)
+        var geo = SchemaObject(type: .table, schema: "dbo", name: "Geo")
+        geo.table = TableDefinition(columns: [ColumnDefinition(name: "Id", dataType: "int", isNullable: false),
+                                              ColumnDefinition(name: "Shape", dataType: "geometry", isNullable: true)])
+        geo.indexes = [spatial]
+        let scriptedGeo = snapshot("CREATE TABLE [dbo].[Geo] ([Id] int NOT NULL, [Shape] geometry NULL)\nGO\n"
+                                   + spatialStatement + "\nGO\n", origin: "Scripted")
+        let liveGeo = SchemaSnapshot(origin: "Live", defaultCollation: defaultCollation, objects: [geo])
+        t.equal(difference(SchemaComparer().compare(source: scriptedGeo, target: liveGeo), "dbo.Geo")?.status, .identical,
+                "scripted spatial index reads back identical")
+
+        // Table types: the default collation is not part of the body; IgnoreCollations covers the rest.
+        let typed = snapshot("""
+        CREATE TYPE [dbo].[Names] AS TABLE (
+            [Name] nvarchar(50) COLLATE SQL_Latin1_General_CP1_CI_AS NULL,
+            [Code] char(3) COLLATE Latin1_General_BIN NOT NULL
+        )
+        GO
+        """, origin: "Typed")
+        let typedBody = typed.objects.first { $0.type == .tableType }?.body ?? ""
+        t.expect(!typedBody.contains("SQL_Latin1_General_CP1_CI_AS") && typedBody.contains("COLLATE Latin1_General_BIN"),
+                 "table type keeps only non-default collations", typedBody)
+        let liveBody = writer.tableTypeBody(
+            quotedName: "[dbo].[Names]",
+            columns: [ColumnDefinition(name: "Name", dataType: "nvarchar(50)", collation: defaultCollation),
+                      ColumnDefinition(name: "Code", dataType: "char(3)", isNullable: false, collation: "Latin1_General_BIN")],
+            indexes: [], checks: [], memoryOptimized: false, defaultCollation: defaultCollation)
+        t.equal(liveBody, typedBody, "live table type body matches the scripted one")
+        let plain = snapshot("CREATE TYPE [dbo].[Names] AS TABLE ([Name] nvarchar(50) NULL, [Code] char(3) NOT NULL)\nGO\n",
+                             origin: "Plain")
+        t.equal(difference(SchemaComparer().compare(source: typed, target: plain), "dbo.Names")?.status, .different,
+                "a non-default collation on a table type column counts")
+        var ignoringCollations = SchemaCompareOptions()
+        ignoringCollations.ignoreCollations = true
+        let ignored = SchemaComparer(options: ignoringCollations).compare(source: typed, target: plain)
+        t.equal(difference(ignored, "dbo.Names")?.status, .identical, "IgnoreCollations covers table types")
+        t.expect(!(difference(ignored, "dbo.Names")?.sourceScript.contains("COLLATE") ?? true),
+                 "ignored collations are not scripted for table types")
+
+        // IgnoreIndexes covers primary keys and unique constraints, as its description promises.
+        let keyed = snapshot("""
+        CREATE TABLE [dbo].[Keyed] (
+            [Id] int NOT NULL, [Code] int NOT NULL,
+            CONSTRAINT [PK_Keyed] PRIMARY KEY CLUSTERED ([Id]),
+            CONSTRAINT [UQ_Keyed] UNIQUE ([Code])
+        )
+        GO
+        CREATE NONCLUSTERED INDEX [IX_Keyed] ON [dbo].[Keyed] ([Code])
+        GO
+        """, origin: "Keyed")
+        let heap = snapshot("CREATE TABLE [dbo].[Keyed] ([Id] int NOT NULL, [Code] int NOT NULL)\nGO\n", origin: "Heap")
+        var ignoringIndexes = SchemaCompareOptions()
+        ignoringIndexes.ignoreIndexes = true
+        let unkeyed = SchemaComparer(options: ignoringIndexes).compare(source: keyed, target: heap)
+        t.equal(difference(unkeyed, "dbo.Keyed")?.status, .identical, "IgnoreIndexes ignores keys and unique constraints")
+        let unkeyedScript = difference(unkeyed, "dbo.Keyed")?.sourceScript ?? ""
+        t.expect(!unkeyedScript.contains("PRIMARY KEY") && !unkeyedScript.contains("UNIQUE")
+                 && !unkeyedScript.contains("CREATE NONCLUSTERED INDEX"), "ignored keys are not scripted", unkeyedScript)
+        t.equal(difference(SchemaComparer().compare(source: keyed, target: heap), "dbo.Keyed")?.status, .different,
+                "keys still count by default")
+    }
+
+    t.suite("deployment warnings") {
+        let wanted = snapshot("""
+        CREATE TABLE [dbo].[Members] (
+            [Id] int NOT NULL CONSTRAINT [PK_Members] PRIMARY KEY,
+            [Code] nvarchar(10) NULL,
+            [Tag] nvarchar(10) NULL,
+            [Alt] nvarchar(10) NULL,
+            [Fixed] nvarchar(10) NOT NULL,
+            CONSTRAINT [UQ_Members_Code] UNIQUE ([Code]),
+            CONSTRAINT [UQ_Members_Fixed] UNIQUE ([Fixed])
+        )
+        GO
+        CREATE UNIQUE NONCLUSTERED INDEX [UX_Members_Tag] ON [dbo].[Members] ([Tag])
+        GO
+        CREATE UNIQUE NONCLUSTERED INDEX [UX_Members_Alt] ON [dbo].[Members] ([Alt]) WHERE [Alt] IS NOT NULL
+        GO
+        """, origin: "Wanted")
+        let existing = snapshot("CREATE TABLE [dbo].[Members] ([Id] int NOT NULL CONSTRAINT [PK_Members] PRIMARY KEY)\nGO\n",
+                                origin: "Existing")
+        let plan = SchemaDeploymentPlanner(comparison: SchemaComparer().compare(source: wanted, target: existing),
+                                           targetDatabaseName: "Existing").plan()
+        let high = plan.warnings.filter { $0.severity == .high }.map(\.message)
+        t.expect(high.contains { $0.contains("[UQ_Members_Code]") && $0.contains("[Code]") },
+                 "a unique constraint over a new nullable column warns", high.joined(separator: " | "))
+        t.expect(high.contains { $0.contains("[UX_Members_Tag]") }, "a unique index over a new nullable column warns")
+        t.expect(!high.contains { $0.contains("[UX_Members_Alt]") }, "a filtered unique index that excludes NULLs does not warn")
+        t.expect(!high.contains { $0.contains("[UQ_Members_Fixed]") }, "a unique constraint over a NOT NULL column does not warn")
     }
 }

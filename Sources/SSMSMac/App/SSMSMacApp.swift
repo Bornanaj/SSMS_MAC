@@ -15,6 +15,7 @@ struct SSMSMacApp: App {
                 .environmentObject(settings)
                 .preferredColorScheme(settings.colorScheme)
                 .frame(minWidth: 1000, minHeight: 640)
+                .onAppear { appDelegate.app = app }
         }
         .commands { AppCommands(app: app, settings: settings) }
 
@@ -53,9 +54,17 @@ struct SSMSMacApp: App {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// Set once the main window is up; quitting asks it about unsaved scripts.
+    weak var app: AppState?
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         // The diagnostics hide their window, which would otherwise quit the app immediately.
         !SelfTest.isRequested && !EditorCheck.isRequested
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let app, !SelfTest.isRequested, !EditorCheck.isRequested else { return .terminateNow }
+        return app.prepareToTerminate() ? .terminateNow : .terminateCancel
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -107,17 +116,21 @@ struct AppCommands: Commands {
 
             Divider()
 
-            Button("Open Script…") { openScript() }
+            Button("Open Script…") { app.openScriptPanel() }
                 .keyboardShortcut("o", modifiers: .command)
         }
 
         CommandGroup(replacing: .saveItem) {
-            Button("Save Script") { saveScript(as: false) }
-                .keyboardShortcut("s", modifiers: .command)
-                .disabled(app.selectedTab == nil)
-            Button("Save Script As…") { saveScript(as: true) }
-                .keyboardShortcut("s", modifiers: [.command, .shift])
-                .disabled(app.selectedTab == nil)
+            Button("Save Script") {
+                if let tab = app.selectedTab { app.saveScript(tab, as: false) }
+            }
+            .keyboardShortcut("s", modifiers: .command)
+            .disabled(app.selectedTab == nil)
+            Button("Save Script As…") {
+                if let tab = app.selectedTab { app.saveScript(tab, as: true) }
+            }
+            .keyboardShortcut("s", modifiers: [.command, .shift])
+            .disabled(app.selectedTab == nil)
         }
 
         CommandMenu("Query") {
@@ -202,7 +215,8 @@ struct AppCommands: Commands {
                 guard let tab = app.selectedTab else { return }
                 app.pendingTemplateScript = tab.text
             }
-            .keyboardShortcut("m", modifiers: [.command, .shift])
+            // SSMS's Ctrl+Shift+M; Cmd+Shift+M is the actual execution plan toggle.
+            .keyboardShortcut("m", modifiers: [.control, .shift])
             .disabled(app.selectedTab == nil)
 
             Divider()
@@ -385,23 +399,6 @@ struct AppCommands: Commands {
                 set: { app.selectedTab?.includeLiveStatistics = $0 })
     }
 
-    private func openScript() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.plainText]
-        panel.allowsOtherFileTypes = true
-        panel.begin { response in
-            guard response == .OK, let url = panel.url,
-                  let text = try? String(contentsOf: url, encoding: .utf8) else { return }
-            Task { @MainActor in
-                let server = app.servers.first
-                let tab = await app.newQueryTab(server: server, database: nil, text: text)
-                tab.fileURL = url
-                tab.title = url.lastPathComponent
-                tab.isDirty = false
-            }
-        }
-    }
-
     /// Opens a saved .scmp or .dcmp project in the matching compare window.
     private func openComparisonProject() {
         guard let url = CompareFilePanels.open(directory: false, types: [CompareFilePanels.schemaProjectType,
@@ -410,26 +407,5 @@ struct AppCommands: Commands {
         let kind = (try? CompareProject.read(from: url))?.kind
         let isData = kind == .data || (kind == nil && url.pathExtension.lowercased() == "dcmp")
         openWindow(id: isData ? "data-compare" : "schema-compare", value: CompareLaunch(projectPath: url.path))
-    }
-
-    private func saveScript(as saveAs: Bool) {
-        guard let tab = app.selectedTab else { return }
-        if let url = tab.fileURL, !saveAs {
-            try? tab.text.write(to: url, atomically: true, encoding: .utf8)
-            tab.isDirty = false
-            return
-        }
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [.plainText]
-        panel.nameFieldStringValue = tab.title.hasSuffix(".sql") ? tab.title : tab.title + ".sql"
-        panel.begin { response in
-            guard response == .OK, let url = panel.url else { return }
-            Task { @MainActor in
-                try? tab.text.write(to: url, atomically: true, encoding: .utf8)
-                tab.fileURL = url
-                tab.title = url.lastPathComponent
-                tab.isDirty = false
-            }
-        }
     }
 }

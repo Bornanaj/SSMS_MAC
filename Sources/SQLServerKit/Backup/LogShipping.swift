@@ -157,7 +157,8 @@ public struct LogShippingSetup: Sendable {
 
     func schedule(_ name: String, everyMinutes: Int, offsetMinutes: Int) -> BackupSchedule {
         BackupSchedule(name: name, frequency: .daily, repeats: true, repeatInterval: max(1, everyMinutes),
-                       repeatUnit: .minutes, startTime: max(0, offsetMinutes) * 60 % 86_400, endTime: 86_399)
+                       repeatUnit: .minutes, startTime: max(0, offsetMinutes) * 60 % 86_400, endTime: 86_399,
+                       startDate: primaryCapabilities.serverTime ?? Date())
     }
 
     func scheduleSQL(jobVariable: String, _ schedule: BackupSchedule, name: String) -> String {

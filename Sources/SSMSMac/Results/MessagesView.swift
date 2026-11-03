@@ -21,28 +21,34 @@ struct MessagesView: View {
             .padding(8)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .textSelection(.enabled)
         .background(Color(nsColor: .textBackgroundColor))
     }
 
+    /// Text selection is enabled per message rather than on the scroll view: a
+    /// selectable container takes the click that should jump to the error's line.
     @ViewBuilder
     private func messageRow(_ message: SQLMessage) -> some View {
         if message.kind == .error {
             VStack(alignment: .leading, spacing: 0) {
-                Text(errorHeader(message))
+                Button {
+                    if message.scriptLine > 0 { onSelectLine(message.scriptLine) }
+                } label: {
+                    Text(errorHeader(message))
+                        .underline(message.scriptLine > 0)
+                }
+                .buttonStyle(.plain)
+                .disabled(message.scriptLine <= 0)
+                .help(message.scriptLine > 0 ? "Jump to line \(message.scriptLine)" : "")
                 Text(message.text)
+                    .textSelection(.enabled)
             }
             .font(.system(.body, design: .monospaced))
             .foregroundStyle(Color.red)
-            .contentShape(Rectangle())
-            .onTapGesture {
-                if message.scriptLine > 0 { onSelectLine(message.scriptLine) }
-            }
-            .help("Click to jump to line \(message.scriptLine)")
         } else {
             Text(message.text)
                 .font(.system(.body, design: .monospaced))
                 .foregroundStyle(Color.primary)
+                .textSelection(.enabled)
         }
     }
 

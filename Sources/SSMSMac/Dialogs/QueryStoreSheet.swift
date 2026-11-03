@@ -36,6 +36,31 @@ struct QueryStoreSheet: View {
     @State private var isBusy = false
     @State private var status: String?
     @State private var isError = false
+    @State private var confirmClear = false
+    /// Plan and script previews open as this sheet's own sheet. Going through
+    /// `app.activeSheet` would replace this window, which is presented from that slot.
+    @State private var preview: LocalPreview?
+
+    private enum LocalPreview: Identifiable {
+        case plan(title: String, xml: String)
+        case script(title: String, sql: String)
+
+        var id: String {
+            switch self {
+            case .plan(let title, _): return "plan-\(title)"
+            case .script(let title, _): return "script-\(title)"
+            }
+        }
+    }
+
+    /// Everything a report depends on, so one task reloads when any of it changes
+    /// instead of five tasks racing each other on the metadata connection.
+    private struct LoadKey: Equatable {
+        var report: Report
+        var database: String
+        var metric: QueryStoreMetric
+        var hours: Int
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -56,12 +81,26 @@ struct QueryStoreSheet: View {
         .task {
             database = initialDatabase ?? server.serverInfo.currentDatabase
             await loadDatabases()
+        }
+        .task(id: LoadKey(report: report, database: database, metric: metric, hours: hours)) {
             await load()
         }
-        .task(id: report) { await load() }
-        .task(id: database) { await load() }
-        .task(id: metric) { await load() }
-        .task(id: hours) { await load() }
+        .sheet(item: $preview) { item in
+            switch item {
+            case .plan(let title, let xml):
+                PlanPreviewSheet(title: title, xml: xml)
+            case .script(let title, let sql):
+                ScriptPreviewSheet(title: title, sql: sql)
+            }
+        }
+        .confirmationDialog("Clear all Query Store data in \(database)?",
+                            isPresented: $confirmClear, titleVisibility: .visible) {
+            Button("Clear All Data", role: .destructive) { Task { await clear() } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Every captured query, plan and runtime statistic is removed. "
+                 + "This cannot be undone.")
+        }
     }
 
     // MARK: Chrome
@@ -102,7 +141,7 @@ struct QueryStoreSheet: View {
                 Button("Set Read Only") { Task { await setState("READ_ONLY") } }
                 Button("Turn Off") { Task { await setState("OFF") } }
                 Divider()
-                Button("Clear All Data", role: .destructive) { Task { await clear() } }
+                Button("Clear All Data…", role: .destructive) { confirmClear = true }
                 Divider()
                 Button("Script the State Change") { scriptState("READ_WRITE") }
             }
@@ -294,7 +333,7 @@ struct QueryStoreSheet: View {
                                                              useCurrentDatabase: azure) else {
             return
         }
-        app.activeSheet = .scriptPreview("Query Store on \(database)", sql + "\nGO\n")
+        preview = .script(title: "Query Store on \(database)", sql: sql + "\nGO\n")
     }
 
     /// Query Store keeps the plan long after the query stopped running, which is the only
@@ -303,7 +342,7 @@ struct QueryStoreSheet: View {
         do {
             let xml = try await QueryStoreService(session: server.session)
                 .planXML(database: database, planID: entry.planID)
-            app.activeSheet = .executionPlan("Query \(entry.queryID), plan \(entry.planID)", xml)
+            preview = .plan(title: "Query \(entry.queryID), plan \(entry.planID)", xml: xml)
         } catch {
             isError = true
             status = String(describing: error)
