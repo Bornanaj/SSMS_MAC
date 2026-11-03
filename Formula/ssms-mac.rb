@@ -6,8 +6,8 @@
 class SsmsMac < Formula
   desc "Native macOS SQL Server client with Object Explorer, T-SQL editor and results grid"
   homepage "https://github.com/Bornanaj/SSMS_MAC"
-  url "https://github.com/Bornanaj/SSMS_MAC/archive/refs/tags/v1.6.1.tar.gz"
-  version "1.6.1"
+  url "https://github.com/Bornanaj/SSMS_MAC/archive/refs/tags/v1.6.2.tar.gz"
+  version "1.6.2"
   license "MIT"
   head "https://github.com/Bornanaj/SSMS_MAC.git", branch: "main"
 
