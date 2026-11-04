@@ -118,7 +118,7 @@ public struct IntelliSenseCatalog: Sendable {
         object(named: name, schema: schema)?.columns ?? []
     }
 
-    func object(named name: String, schema: String?) -> IntelliSenseObject? {
+    public func object(named name: String, schema: String?) -> IntelliSenseObject? {
         let bare = IntelliSenseCatalog.unquote(name)
         if let schema {
             let bareSchema = IntelliSenseCatalog.unquote(schema)
@@ -130,7 +130,7 @@ public struct IntelliSenseCatalog: Sendable {
         return tables.first { $0.name.caseInsensitiveCompare(bare) == .orderedSame }
     }
 
-    func routine(named name: String, schema: String?) -> IntelliSenseObject? {
+    public func routine(named name: String, schema: String?) -> IntelliSenseObject? {
         let bare = IntelliSenseCatalog.unquote(name)
         if let schema {
             let bareSchema = IntelliSenseCatalog.unquote(schema)
