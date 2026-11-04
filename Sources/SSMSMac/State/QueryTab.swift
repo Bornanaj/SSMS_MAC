@@ -84,6 +84,11 @@ final class QueryTab: ObservableObject, Identifiable {
     /// nothing rather than a keyword list there.
     @Published private(set) var completionIsMemberContext = false
     @Published private(set) var isLoadingCatalog = false
+    /// What the completion catalog is doing, shown in the status bar: a load in
+    /// progress, what it found, or why it did not.
+    @Published private(set) var intelliSenseStatus = ""
+    /// The last catalog failure, for the status bar's tooltip.
+    @Published private(set) var intelliSenseError: String?
     /// Raised on the main actor once a completion request has landed, so the popup can
     /// open with the real list instead of whatever was cached a keystroke ago.
     var onCompletionsUpdated: (() -> Void)?
@@ -226,8 +231,25 @@ final class QueryTab: ObservableObject, Identifiable {
         let target = database
         catalogTask?.cancel()
         isLoadingCatalog = true
+        intelliSenseStatus = "IntelliSense: reading \(target)…"
         catalogTask = Task { [weak self] in
-            _ = try? await intelliSense.refresh(database: target)
+            do {
+                let catalog = try await intelliSense.refresh(database: target)
+                guard !Task.isCancelled else { return }
+                self?.intelliSenseStatus = "IntelliSense: \(catalog.tables.count) tables, "
+                    + "\(catalog.routines.count) routines"
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled else { return }
+                // A login without VIEW DEFINITION sees nothing in sys.columns, and the
+                // editor then offers keywords only. Saying so beats looking broken.
+                // Quiet on purpose: a login without VIEW DEFINITION sees nothing in
+                // sys.columns, and that is a status line, not an error to interrupt
+                // the results pane with.
+                self?.intelliSenseStatus = "IntelliSense: \(target) could not be read"
+                self?.intelliSenseError = String(describing: error)
+            }
             self?.isLoadingCatalog = false
         }
     }

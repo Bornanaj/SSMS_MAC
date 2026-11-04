@@ -95,6 +95,23 @@ struct ObjectExplorerView: View {
         }
         .listStyle(.sidebar)
         .environment(\.defaultMinListRowHeight, 22)
+        // The outline is driven from a flat row list, so the arrow keys are handled
+        // here rather than left to the table: up and down walk the rows, right opens a
+        // node or steps into it, left closes it or steps out to its parent.
+        .onKeyPress(.upArrow) { model.moveSelection(by: -1) ? .handled : .ignored }
+        .onKeyPress(.downArrow) { model.moveSelection(by: 1) ? .handled : .ignored }
+        .onKeyPress(.leftArrow) { model.collapseSelection() ? .handled : .ignored }
+        .onKeyPress(.rightArrow) {
+            Task { await model.expandSelection() }
+            return .handled
+        }
+        .onKeyPress(.home) { model.selectFirst(); return .handled }
+        .onKeyPress(.end) { model.selectLast(); return .handled }
+        .onKeyPress(.return) {
+            guard let id = model.selectedID, let node = model.node(id: id) else { return .ignored }
+            Task { await handleDoubleClick(node) }
+            return .handled
+        }
     }
 
     @ViewBuilder
@@ -104,6 +121,9 @@ struct ObjectExplorerView: View {
 
             if node.isExpandable {
                 Button {
+                    // Clicking the chevron also selects, so the keyboard carries on
+                    // from wherever the mouse left off.
+                    model.selectedID = node.id
                     Task { await model.toggle(node) }
                 } label: {
                     Image(systemName: model.isExpanded(node) ? "chevron.down" : "chevron.right")
@@ -139,9 +159,13 @@ struct ObjectExplorerView: View {
             Spacer(minLength: 0)
         }
         .contentShape(Rectangle())
-        .onTapGesture(count: 2) {
+        // A plain tap gesture swallows the click the list needs to select the row and
+        // take focus, which is what made a single click do nothing sometimes and the
+        // arrow keys do nothing ever. A simultaneous gesture leaves that click alone.
+        .simultaneousGesture(TapGesture(count: 2).onEnded {
+            model.selectedID = node.id
             Task { await handleDoubleClick(node) }
-        }
+        })
         .contextMenu { ObjectExplorerMenu(node: node, model: model) }
         .help(model.error(for: node) ?? node.displayPath)
     }

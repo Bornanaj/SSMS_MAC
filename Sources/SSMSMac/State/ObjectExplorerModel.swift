@@ -96,6 +96,60 @@ final class ObjectExplorerModel: ObservableObject {
         return servicesBySession[sessionID]
     }
 
+    // MARK: - Keyboard navigation
+
+    /// The rows the keyboard walks, which is exactly what the outline shows.
+    private var visibleNodes: [ObjectExplorerNode] { visibleRows.map(\.node) }
+
+    private var selectedIndex: Int? {
+        guard let selectedID else { return nil }
+        return visibleNodes.firstIndex { $0.id == selectedID }
+    }
+
+    /// Moves the selection by whole rows. Returns false when there is nowhere to go,
+    /// so the view can let the key fall through.
+    @discardableResult
+    func moveSelection(by delta: Int) -> Bool {
+        let nodes = visibleNodes
+        guard !nodes.isEmpty else { return false }
+        guard let current = selectedIndex else {
+            selectedID = nodes.first?.id
+            return true
+        }
+        let target = current + delta
+        guard nodes.indices.contains(target) else { return false }
+        selectedID = nodes[target].id
+        return true
+    }
+
+    func selectFirst() { selectedID = visibleNodes.first?.id }
+    func selectLast() { selectedID = visibleNodes.last?.id }
+
+    /// Right arrow: open a closed node, or step into an open one, the way every
+    /// outline on this platform behaves.
+    @discardableResult
+    func expandSelection() async -> Bool {
+        guard let id = selectedID, let node = nodeIndex[id] else { return false }
+        if node.isExpandable && !expandedIDs.contains(id) {
+            await expand(node)
+            return true
+        }
+        return moveSelection(by: 1)
+    }
+
+    /// Left arrow: close an open node, or step out to its parent.
+    @discardableResult
+    func collapseSelection() -> Bool {
+        guard let id = selectedID, let node = nodeIndex[id] else { return false }
+        if node.isExpandable && expandedIDs.contains(id) {
+            expandedIDs.remove(id)
+            return true
+        }
+        guard let parentID = node.parentID, nodeIndex[parentID] != nil else { return false }
+        selectedID = parentID
+        return true
+    }
+
     /// Flattened rows for the outline, honouring the current expansion state.
     var visibleRows: [(node: ObjectExplorerNode, depth: Int)] {
         var rows: [(ObjectExplorerNode, Int)] = []

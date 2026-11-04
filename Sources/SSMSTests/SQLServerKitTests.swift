@@ -213,6 +213,43 @@ func runSQLServerKitTests(_ t: TestRunner, extra: (TestRunner) -> Void = { _ in 
         t.equal(instance.addressDescription, "sqlbox\\SQLEXPRESS,1444 · CONTOSO\\dba",
                 "instance, non-default port and domain account")
 
+        // One server under two entries is how the list ends up showing two names for
+        // the same address: the same host, port, authentication and login is one
+        // connection, and merging keeps whatever each entry knew.
+        let newest = ConnectionProfile(name: "", server: "172.31.112.70",
+                                       discoveredServerName: "OMS-01", username: "sa",
+                                       lastUsed: Date())
+        let older = ConnectionProfile(name: "Order Management", server: "172.31.112.70",
+                                      username: "sa", database: "OmsDB",
+                                      lastUsed: Date(timeIntervalSince1970: 0))
+        let other = ConnectionProfile(server: "172.31.112.68",
+                                      discoveredServerName: "Delivery-01", username: "sa")
+        let merged = ConnectionProfile.mergedByCredential([newest, older, other])
+        t.equal(merged.count, 2, "the two entries for one address become one")
+        t.equal(merged.first?.discoveredServerName, "OMS-01", "the newest entry wins")
+        t.equal(merged.first?.name, "Order Management",
+                "but the name typed by hand is not thrown away")
+        t.equal(merged.first?.database, "OmsDB", "nor is the database it opened")
+        t.equal(merged.last?.server, "172.31.112.68", "a different address stays its own entry")
+
+        // A different login on the same host is a different connection, not a duplicate.
+        let otherLogin = ConnectionProfile(server: "172.31.112.70",
+                                           username: "reporting")
+        t.equal(ConnectionProfile.mergedByCredential([newest, otherLogin]).count, 2,
+                "the login is part of what makes a connection distinct")
+
+        // Two entries disagreeing about one server is worth saying out loud.
+        var mislabelled = ConnectionProfile(name: "OMS-01", server: "172.31.112.70",
+                                            discoveredServerName: "Delivery-01", username: "sa")
+        t.equal(mislabelled.displayName, "OMS-01", "the typed name is still the title")
+        t.equal(mislabelled.reportedNameNote, "Delivery-01",
+                "and the row can say which server actually answered")
+        mislabelled.name = ""
+        t.expect(mislabelled.reportedNameNote == nil,
+                 "with no typed name there is nothing to disagree with")
+        t.equal(mislabelled.pickerLabel, "Delivery-01 · 172.31.112.70 · sa",
+                "a menu row carries the address so duplicates can be told apart")
+
         // Saved connections written before the server name was recorded have to keep
         // decoding, or the whole list is lost on upgrade.
         let legacy = Data("""

@@ -128,6 +128,17 @@ struct QueryWindowView: View {
             Text(tab.statusText)
                 .lineLimit(1)
             Spacer()
+            // IntelliSense is only as good as its catalog, and on a large database
+            // that catalog takes a while. Say where it is instead of leaving the
+            // editor looking broken.
+            if !tab.intelliSenseStatus.isEmpty {
+                HStack(spacing: 4) {
+                    if tab.isLoadingCatalog { ProgressView().controlSize(.mini) }
+                    Text(tab.intelliSenseStatus)
+                }
+                .help(tab.intelliSenseError
+                      ?? "IntelliSense catalog. Refresh it with ⌘⇧R.")
+            }
             if !tab.serverLabel.isEmpty {
                 Text(tab.serverLabel)
             }

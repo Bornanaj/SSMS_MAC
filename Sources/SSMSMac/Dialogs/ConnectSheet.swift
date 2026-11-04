@@ -64,6 +64,15 @@ struct ConnectSheet: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
+                        // A name typed by hand keeps the title, but if the server
+                        // answered to a different one, the row says so rather than
+                        // leaving two entries disagreeing about the same address.
+                        if let reported = saved.reportedNameNote {
+                            Text("answers as \(reported)")
+                                .font(.caption2)
+                                .foregroundStyle(.orange)
+                                .lineLimit(1)
+                        }
                     }
                     .help(saved.authentication.displayName)
                     .tag(saved.id)

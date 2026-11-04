@@ -127,6 +127,24 @@ public struct ConnectionProfile: Codable, Identifiable, Hashable, Sendable {
         return text
     }
 
+    /// What the engine calls itself, when that is not what this entry is titled. A name
+    /// typed by hand wins the title — it was typed on purpose — but the list says which
+    /// server actually answered, so two entries can never quietly disagree.
+    public var reportedNameNote: String? {
+        guard let discovered = discoveredServerName, !discovered.isEmpty,
+              displayName.caseInsensitiveCompare(discovered) != .orderedSame else { return nil }
+        return discovered
+    }
+
+    /// "OMS-01 · 172.31.112.70 · sa" — what a menu row needs to tell two entries that
+    /// share a name apart.
+    public var pickerLabel: String {
+        let address = addressDescription
+        return displayName.caseInsensitiveCompare(address) == .orderedSame
+            ? address
+            : "\(displayName) · \(address)"
+    }
+
     /// Keychain account key for this profile's password.
     public var credentialKey: String {
         let parsed = TDSConfiguration.parseServerName(server)
@@ -170,6 +188,35 @@ public struct ConnectionProfile: Codable, Identifiable, Hashable, Sendable {
             readOnlyIntent: applicationIntentReadOnly,
             multiSubnetFailover: multiSubnetFailover
         )
+    }
+}
+
+extension ConnectionProfile {
+    /// Collapses entries that point at the same host, port, authentication and login.
+    ///
+    /// Two of them are the same connection, and keeping both is how a list ends up
+    /// showing one server under two names — one typed by hand long ago, one reported by
+    /// the engine. The first entry of each pair wins (callers pass them newest first)
+    /// and anything the loser carried that the winner lacks is kept.
+    public static func mergedByCredential(_ profiles: [ConnectionProfile]) -> [ConnectionProfile] {
+        var result: [ConnectionProfile] = []
+        var indexByKey: [String: Int] = [:]
+        for profile in profiles {
+            let key = profile.credentialKey.lowercased()
+            guard let index = indexByKey[key] else {
+                indexByKey[key] = result.count
+                result.append(profile)
+                continue
+            }
+            if result[index].name.isEmpty { result[index].name = profile.name }
+            if (result[index].discoveredServerName ?? "").isEmpty {
+                result[index].discoveredServerName = profile.discoveredServerName
+            }
+            if result[index].database.isEmpty { result[index].database = profile.database }
+            if result[index].colorHex == nil { result[index].colorHex = profile.colorHex }
+            if result[index].lastUsed == nil { result[index].lastUsed = profile.lastUsed }
+        }
+        return result
     }
 }
 

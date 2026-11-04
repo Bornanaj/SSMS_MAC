@@ -221,9 +221,16 @@ public actor IntelliSenseProvider {
 
     @discardableResult
     public func refresh(database: String) async throws -> IntelliSenseCatalog {
-        let tables = try await loadTables(database: database)
-        let routines = try await loadRoutines(database: database)
-        let relationships = try await loadRelationships(database: database)
+        // The catalog is a big read, and the session's metadata connection is shared
+        // with the Object Explorer and every properties sheet. On a production
+        // database that read takes long enough to stall all of them, so it gets a
+        // connection of its own and gives it back when it is done.
+        let connection = try await session.openConnection(database: database)
+        defer { Task { try? await connection.close() } }
+
+        let tables = try await loadTables(on: connection)
+        let routines = try await loadRoutines(on: connection)
+        let relationships = try await loadRelationships(on: connection)
         let schemas = Set(tables.map(\.schema)).union(routines.map(\.schema)).sorted()
         let catalog = IntelliSenseCatalog(database: database, fetchedAt: Date(),
                                           schemas: schemas, tables: tables, routines: routines,
@@ -495,7 +502,7 @@ public actor IntelliSenseProvider {
 
     // MARK: Catalog loading
 
-    private func loadTables(database: String) async throws -> [IntelliSenseObject] {
+    private func loadTables(on connection: TDSConnection) async throws -> [IntelliSenseObject] {
         let sql = """
         SELECT s.name AS schema_name, o.name AS object_name,
                CASE WHEN o.type = 'V' THEN N'view' ELSE N'table' END AS object_kind,
@@ -506,21 +513,24 @@ public actor IntelliSenseProvider {
         JOIN sys.schemas AS s ON s.schema_id = o.schema_id
         JOIN sys.columns AS c ON c.object_id = o.object_id
         JOIN sys.types AS t ON t.user_type_id = c.user_type_id
-        OUTER APPLY (
-            SELECT TOP (1) ic.column_id
+        -- One pass over the primary key columns, rather than a lookup per column:
+        -- the correlated form costs an index seek for every column in the database.
+        LEFT JOIN (
+            SELECT ic.object_id, ic.column_id
             FROM sys.indexes AS i
             JOIN sys.index_columns AS ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
-            WHERE i.object_id = o.object_id AND i.is_primary_key = 1 AND ic.column_id = c.column_id
-        ) AS pk
+            WHERE i.is_primary_key = 1
+        ) AS pk ON pk.object_id = c.object_id AND pk.column_id = c.column_id
         WHERE o.type IN ('U', 'V') AND o.is_ms_shipped = 0
         ORDER BY s.name, o.name, c.column_id
         """
-        let result = try await session.metadataQuery(sql, database: database)
+        let result = try await connection.query(sql)
+        if let failure = result.errors.first { throw failure }
         return IntelliSenseProvider.groupObjects(result.resultSets.first?.dictionaries() ?? [],
                                                  isRoutine: false)
     }
 
-    private func loadRoutines(database: String) async throws -> [IntelliSenseObject] {
+    private func loadRoutines(on connection: TDSConnection) async throws -> [IntelliSenseObject] {
         let sql = """
         SELECT s.name AS schema_name, o.name AS object_name,
                CASE WHEN o.type = 'P' THEN N'procedure' ELSE N'function' END AS object_kind,
@@ -537,12 +547,13 @@ public actor IntelliSenseProvider {
         WHERE o.type IN ('P', 'FN', 'IF', 'TF', 'AF') AND o.is_ms_shipped = 0
         ORDER BY s.name, o.name, p.parameter_id
         """
-        let result = try await session.metadataQuery(sql, database: database)
+        let result = try await connection.query(sql)
+        if let failure = result.errors.first { throw failure }
         return IntelliSenseProvider.groupObjects(result.resultSets.first?.dictionaries() ?? [],
                                                  isRoutine: true)
     }
 
-    private func loadRelationships(database: String) async throws -> [IntelliSenseRelationship] {
+    private func loadRelationships(on connection: TDSConnection) async throws -> [IntelliSenseRelationship] {
         let sql = """
         SELECT fk.name,
                ps.name AS parent_schema, pt.name AS parent_table,
@@ -569,7 +580,8 @@ public actor IntelliSenseProvider {
         JOIN sys.objects AS rt ON rt.object_id = fk.referenced_object_id
         JOIN sys.schemas AS rs ON rs.schema_id = rt.schema_id
         """
-        let result = try await session.metadataQuery(sql, database: database)
+        let result = try await connection.query(sql)
+        if let failure = result.errors.first { throw failure }
         func split(_ value: String) -> [String] {
             value.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
                 .filter { !$0.isEmpty }

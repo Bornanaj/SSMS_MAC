@@ -23,6 +23,11 @@ final class ConnectionStore: ObservableObject {
         decoder.dateDecodingStrategy = .iso8601
         profiles = (try? decoder.decode([ConnectionProfile].self, from: data)) ?? []
         profiles.sort { ($0.lastUsed ?? .distantPast) > ($1.lastUsed ?? .distantPast) }
+        let merged = ConnectionProfile.mergedByCredential(profiles)
+        if merged.count != profiles.count {
+            profiles = merged
+            persist()
+        }
     }
 
     private func persist() {
@@ -38,8 +43,26 @@ final class ConnectionStore: ObservableObject {
     func save(_ profile: ConnectionProfile, password: String?) {
         var updated = profile
         updated.lastUsed = Date()
+
         if let index = profiles.firstIndex(where: { $0.id == profile.id }) {
+            // The address or the login was edited: whatever the old server called
+            // itself says nothing about the new one.
+            if profiles[index].credentialKey != updated.credentialKey,
+               updated.discoveredServerName == profiles[index].discoveredServerName {
+                updated.discoveredServerName = nil
+            }
             profiles[index] = updated
+        } else if let twin = profiles.firstIndex(where: {
+            $0.credentialKey.caseInsensitiveCompare(updated.credentialKey) == .orderedSame
+        }) {
+            // Same host, port, authentication and login: one entry, not two. A name the
+            // user typed on the existing entry survives a connection that did not set one.
+            if updated.name.isEmpty { updated.name = profiles[twin].name }
+            if (updated.discoveredServerName ?? "").isEmpty {
+                updated.discoveredServerName = profiles[twin].discoveredServerName
+            }
+            updated.id = profiles[twin].id
+            profiles[twin] = updated
         } else {
             profiles.append(updated)
         }

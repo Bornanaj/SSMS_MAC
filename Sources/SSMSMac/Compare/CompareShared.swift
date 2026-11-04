@@ -29,26 +29,48 @@ struct CompareLaunch: Codable, Hashable {
 final class CompareSessionPool {
     private var owned: [UUID: SQLServerSession] = [:]
 
+    /// Passwords typed into a compare window for a connection that had none saved.
+    /// They live as long as the window and are never written to disk here.
+    private var typedPasswords: [String: String] = [:]
+
+    func rememberPassword(_ password: String, for profile: ConnectionProfile) {
+        typedPasswords[profile.credentialKey] = password
+    }
+
     func session(for endpoint: CompareEndpoint, app: AppState) async throws -> SQLServerSession {
         guard let profile = endpoint.connection else {
             throw SQLServerError.invalidProfile("Choose a server.")
         }
         if let server = app.server(id: profile.id) { return server.session }
-        if let server = app.servers.first(where: {
-            $0.profile.server.caseInsensitiveCompare(profile.server) == .orderedSame
-                && $0.profile.username.caseInsensitiveCompare(profile.username) == .orderedSame
-        }) {
+        if let server = app.servers.first(where: { matches($0, profile: profile) }) {
             return server.session
         }
         if let existing = owned[profile.id], !(await existing.isClosed) { return existing }
-        let password = await app.connections.password(for: profile)
+
+        // A connection that is not open yet is opened here rather than refused: the
+        // saved password is used when there is one, and the window asks for it when
+        // there is not.
+        let password = typedPasswords[profile.credentialKey]
+            ?? await app.connections.password(for: profile)
         if profile.authentication.needsPassword && (password ?? "").isEmpty {
-            throw SQLServerError.invalidProfile(
-                "No saved password for \(profile.displayName). Connect to it from File → Connect to Server first.")
+            throw CompareConnectionError.passwordRequired(profile)
         }
         let session = try await SQLServerSession.connect(profile: profile, password: password)
         owned[profile.id] = session
         return session
+    }
+
+    /// A server is the same one whether it was reached by address or is listed under
+    /// the name it reports.
+    private func matches(_ server: ConnectedServer, profile: ConnectionProfile) -> Bool {
+        if server.profile.server.caseInsensitiveCompare(profile.server) == .orderedSame
+            && server.profile.username.caseInsensitiveCompare(profile.username) == .orderedSame {
+            return true
+        }
+        let reported = server.serverInfo.serverName
+        guard !reported.isEmpty else { return false }
+        return reported.caseInsensitiveCompare(profile.displayName) == .orderedSame
+            || reported.caseInsensitiveCompare(profile.discoveredServerName ?? "") == .orderedSame
     }
 
     func closeAll() {
@@ -56,6 +78,25 @@ final class CompareSessionPool {
         owned.removeAll()
         Task {
             for session in sessions { await session.close() }
+        }
+    }
+}
+
+/// Why a compare window could not open a connection, when the answer is something the
+/// user can supply rather than an error to read.
+enum CompareConnectionError: Error, CustomStringConvertible {
+    case passwordRequired(ConnectionProfile)
+
+    var description: String {
+        switch self {
+        case .passwordRequired(let profile):
+            return "\(profile.displayName) has no saved password."
+        }
+    }
+
+    var profile: ConnectionProfile {
+        switch self {
+        case .passwordRequired(let profile): return profile
         }
     }
 }
@@ -94,6 +135,11 @@ final class EndpointSelection: ObservableObject {
 
     var isComplete: Bool { endpoint.isComplete }
 
+    /// Set when the chosen connection needs a password this window does not have; the
+    /// picker shows a field for it rather than telling the user to go and connect
+    /// somewhere else first.
+    @Published var passwordPrompt: ConnectionProfile?
+
     func loadDatabases(app: AppState, pool: CompareSessionPool) async {
         guard kind == .database, profile != nil else { return }
         isLoadingDatabases = true
@@ -104,6 +150,11 @@ final class EndpointSelection: ObservableObject {
             let result = try await session.metadataQuery(
                 "SELECT name FROM sys.databases WHERE HAS_DBACCESS(name) = 1 AND state = 0 ORDER BY name")
             databases = (result.resultSets.first?.dictionaries() ?? []).map { $0.string("name") }
+            passwordPrompt = nil
+        } catch let error as CompareConnectionError {
+            passwordPrompt = error.profile
+            loadError = nil
+            databases = []
         } catch {
             loadError = String(describing: error)
             databases = []
@@ -143,6 +194,8 @@ struct CompareEndpointPicker: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    @State private var typedPassword = ""
+
     @ViewBuilder
     private var databaseFields: some View {
         Menu {
@@ -153,16 +206,32 @@ struct CompareEndpointPicker: View {
                     }
                 }
             }
-            if !app.connections.profiles.isEmpty {
+            if !connectable.isEmpty {
                 Section("Saved connections") {
-                    ForEach(app.connections.profiles) { profile in
-                        Button(profile.displayName) { choose(profile) }
+                    // The address is on the row: two entries can carry the same name,
+                    // and picking the wrong one is how a comparison ends up reading the
+                    // wrong server.
+                    ForEach(connectable) { profile in
+                        Button(profile.pickerLabel) { choose(profile) }
                     }
                 }
             }
         } label: {
-            Label(selection.profile?.displayName ?? "Choose a server", systemImage: "server.rack")
+            Label(selection.profile?.pickerLabel ?? "Choose a server", systemImage: "server.rack")
                 .frame(maxWidth: .infinity, alignment: .leading)
+        }
+
+        if let pending = selection.passwordPrompt {
+            HStack(spacing: 6) {
+                SecureField("Password for \(pending.displayName)", text: $typedPassword)
+                    .textFieldStyle(.roundedBorder)
+                Button("Connect") {
+                    pool.rememberPassword(typedPassword, for: pending)
+                    typedPassword = ""
+                    Task { await selection.loadDatabases(app: app, pool: pool) }
+                }
+                .disabled(typedPassword.isEmpty)
+            }
         }
         HStack {
             if selection.databases.isEmpty {
@@ -209,8 +278,17 @@ struct CompareEndpointPicker: View {
         }
     }
 
+    /// Saved connections, minus the ones already listed as connected, so the same
+    /// server is not offered twice under two labels.
+    private var connectable: [ConnectionProfile] {
+        let open = Set(app.servers.map { $0.profile.credentialKey.lowercased() })
+        return app.connections.profiles.filter { !open.contains($0.credentialKey.lowercased()) }
+    }
+
     private func choose(_ profile: ConnectionProfile) {
         selection.profile = profile
+        selection.passwordPrompt = nil
+        typedPassword = ""
         if selection.database.isEmpty { selection.database = profile.database }
         Task { await selection.loadDatabases(app: app, pool: pool) }
     }
