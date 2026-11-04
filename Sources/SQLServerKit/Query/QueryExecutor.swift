@@ -190,19 +190,31 @@ public final class QueryExecutor: @unchecked Sendable {
             return summary
         }
 
-        // Preamble: database context, SET options and plan/statistics switches.
-        var preamble: [String] = []
-        if let database = options.database, !database.isEmpty,
-           connection.database.caseInsensitiveCompare(database) != .orderedSame {
-            preamble.append("USE \(SQLIdentifier.quote(database));")
+        // Preamble: database context, SET options and plan/statistics switches. A
+        // failure here ends the run before any batch: a USE that failed would otherwise
+        // leave the script running in whatever database the connection was in.
+        let preambleBatches = QueryExecutor.preambleBatches(for: options,
+                                                            currentDatabase: connection.database)
+
+        // Restores the switches so the connection is reusable.
+        func restoreSwitches() async {
+            for text in QueryExecutor.epilogueBatches(for: options) where !connection.isClosed {
+                _ = try? await connection.query(text)
+            }
         }
-        if let setOptions = options.setOptions { preamble.append(setOptions.script) }
-        if options.includeActualExecutionPlan { preamble.append("SET STATISTICS XML ON;") }
-        if options.includeEstimatedExecutionPlan { preamble.append("SET SHOWPLAN_XML ON;") }
-        if options.includeIOStatistics { preamble.append("SET STATISTICS IO ON;") }
-        if options.includeTimeStatistics { preamble.append("SET STATISTICS TIME ON;") }
-        if !preamble.isEmpty {
-            _ = try? await connection.query(preamble.joined(separator: "\n"))
+
+        for text in preambleBatches {
+            do {
+                _ = try await connection.query(text)
+            } catch {
+                onEvent(.message(QueryExecutor.message(for: error)))
+                summary.errorCount += 1
+                await restoreSwitches()
+                summary.finishedAt = Date()
+                summary.elapsed = Date().timeIntervalSince(overallStart)
+                onEvent(.finished(summary))
+                return summary
+            }
         }
 
         var timeoutTask: Task<Void, Never>?
@@ -210,8 +222,11 @@ public final class QueryExecutor: @unchecked Sendable {
             let seconds = options.timeoutSeconds
             timeoutTask = Task { [weak self] in
                 try? await Task.sleep(nanoseconds: UInt64(seconds) * 1_000_000_000)
-                guard !Task.isCancelled else { return }
-                self?.cancel()
+                guard !Task.isCancelled, let self else { return }
+                onEvent(.message(SQLMessage(kind: .error,
+                                            text: "The query was cancelled: the execution timeout of "
+                                                + "\(seconds) second\(seconds == 1 ? "" : "s") elapsed.")))
+                self.cancel()
             }
         }
         defer { timeoutTask?.cancel() }
@@ -232,20 +247,22 @@ public final class QueryExecutor: @unchecked Sendable {
                         collector.consume(event)
                     }
                 } catch let error as TDSError {
+                    // Reported through the event stream, like a server error, rather
+                    // than thrown as well: a caller that showed both would show it twice.
                     if case .cancelled = error {
                         summary.cancelled = true
                     } else {
-                        let message = SQLMessage(kind: .error, text: String(describing: error))
-                        onEvent(.message(message))
+                        onEvent(.message(QueryExecutor.message(for: error)))
                         summary.errorCount += 1
                     }
                     collector.finish()
                     onEvent(.batchFinished(index: batch.index,
                                            elapsed: Date().timeIntervalSince(batchStart), failed: true))
+                    await restoreSwitches()
                     summary.finishedAt = Date()
                     summary.elapsed = Date().timeIntervalSince(overallStart)
                     onEvent(.finished(summary))
-                    throw error
+                    return summary
                 }
 
                 let result = collector.finish()
@@ -263,15 +280,7 @@ public final class QueryExecutor: @unchecked Sendable {
             if summary.cancelled { break }
         }
 
-        // Restore plan/statistics switches so the connection is reusable.
-        var epilogue: [String] = []
-        if options.includeActualExecutionPlan { epilogue.append("SET STATISTICS XML OFF;") }
-        if options.includeEstimatedExecutionPlan { epilogue.append("SET SHOWPLAN_XML OFF;") }
-        if options.includeIOStatistics { epilogue.append("SET STATISTICS IO OFF;") }
-        if options.includeTimeStatistics { epilogue.append("SET STATISTICS TIME OFF;") }
-        if !epilogue.isEmpty && !connection.isClosed {
-            _ = try? await connection.query(epilogue.joined(separator: "\n"))
-        }
+        await restoreSwitches()
 
         if isCancelled { summary.cancelled = true }
         summary.finishedAt = Date()
@@ -281,6 +290,50 @@ public final class QueryExecutor: @unchecked Sendable {
         summary.statistics.rowsAffected = summary.rowsAffected
         onEvent(.finished(summary))
         return summary
+    }
+
+    /// The batches sent before the script: the database context, the SET block and the
+    /// plan/statistics switches, each in a batch SQL Server accepts.
+    ///
+    /// `SET SHOWPLAN_XML` has to be the only statement in its batch (Msg 1067), so it
+    /// travels on its own. Sharing a batch with the SET block made it fail silently, and
+    /// the script then ran for real instead of being planned.
+    public static func preambleBatches(for options: QueryExecutionOptions,
+                                       currentDatabase: String) -> [String] {
+        var preamble: [String] = []
+        if let database = options.database, !database.isEmpty,
+           currentDatabase.caseInsensitiveCompare(database) != .orderedSame {
+            preamble.append("USE \(SQLIdentifier.quote(database));")
+        }
+        if let setOptions = options.setOptions { preamble.append(setOptions.script) }
+        if options.includeActualExecutionPlan { preamble.append("SET STATISTICS XML ON;") }
+        if options.includeIOStatistics { preamble.append("SET STATISTICS IO ON;") }
+        if options.includeTimeStatistics { preamble.append("SET STATISTICS TIME ON;") }
+        var batches: [String] = []
+        if !preamble.isEmpty { batches.append(preamble.joined(separator: "\n")) }
+        if options.includeEstimatedExecutionPlan { batches.append("SET SHOWPLAN_XML ON;") }
+        return batches
+    }
+
+    /// The batches that put the connection back the way it was. SHOWPLAN goes first
+    /// and alone: while it is on, the statements of any other batch are not executed.
+    public static func epilogueBatches(for options: QueryExecutionOptions) -> [String] {
+        var batches: [String] = []
+        if options.includeEstimatedExecutionPlan { batches.append("SET SHOWPLAN_XML OFF;") }
+        var epilogue: [String] = []
+        if options.includeActualExecutionPlan { epilogue.append("SET STATISTICS XML OFF;") }
+        if options.includeIOStatistics { epilogue.append("SET STATISTICS IO OFF;") }
+        if options.includeTimeStatistics { epilogue.append("SET STATISTICS TIME OFF;") }
+        if !epilogue.isEmpty { batches.append(epilogue.joined(separator: "\n")) }
+        return batches
+    }
+
+    /// A server error keeps its number, severity and line; anything else is text.
+    private static func message(for error: Error) -> SQLMessage {
+        if case TDSError.server(let serverMessage) = error {
+            return SQLMessage(server: serverMessage, batchIndex: 0, batchStartLine: 1)
+        }
+        return SQLMessage(kind: .error, text: String(describing: error))
     }
 }
 

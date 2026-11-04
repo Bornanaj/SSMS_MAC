@@ -227,8 +227,15 @@ extension SchemaScriptParser {
             } else if cursor.accept("CONSTRAINT") {
                 pendingName = cursor.identifier()
             } else if cursor.accept("DEFAULT") {
-                let range = cursor.skipUntil(Self.columnAttributeWords)
-                let expression = range.isEmpty ? "" : cursor.text(from: range.lowerBound, to: range.upperBound - 1)
+                let expression: String
+                if cursor.word() == "NULL" {
+                    // A bare NULL is the default value, not the column's nullability.
+                    expression = "NULL"
+                    cursor.advance()
+                } else {
+                    let range = cursor.skipUntil(Self.columnAttributeWords)
+                    expression = range.isEmpty ? "" : cursor.text(from: range.lowerBound, to: range.upperBound - 1)
+                }
                 column.defaultConstraint = DefaultConstraintDefinition(name: pendingName ?? "", definition: expression,
                                                                        isSystemNamed: pendingName == nil)
                 pendingName = nil
@@ -241,8 +248,20 @@ extension SchemaScriptParser {
                 guard let indexName = cursor.identifier() else { continue }
                 let clustered = cursor.accept("CLUSTERED")
                 _ = cursor.accept("NONCLUSTERED")
-                object.indexes.append(IndexDefinition(name: indexName, kind: clustered ? .clustered : .nonclustered,
-                                                      columns: [IndexColumn(name: name)]))
+                var index = IndexDefinition(name: indexName, kind: clustered ? .clustered : .nonclustered,
+                                            columns: [IndexColumn(name: name)])
+                if cursor.word() == "WITH", cursor.word(1) == "(" {
+                    cursor.advance()
+                    index.options = Self.indexOptions(cursor.optionList(), base: index.options)
+                }
+                if cursor.word() == "ON", cursor.word(1) != "DELETE", cursor.word(1) != "UPDATE" {
+                    cursor.advance()
+                    if let space = cursor.identifier() {
+                        index.dataSpace = space
+                        if cursor.word() == "(" { index.partitionColumn = cursor.nameList().first }
+                    }
+                }
+                object.indexes.append(index)
             } else {
                 cursor.advance()
             }
@@ -285,11 +304,25 @@ extension SchemaScriptParser {
         }
     }
 
-    /// `PRIMARY KEY [CLUSTERED|NONCLUSTERED] [(cols)] [WITH (...)] [ON ds]`
+    /// Words that end a table-level key constraint.
+    private static let keyConstraintStopWords: Set<String> =
+        ["CONSTRAINT", "PRIMARY", "UNIQUE", "CHECK", "REFERENCES", "FOREIGN", "DEFAULT", "NOT", "NULL"]
+
+    /// Words that end a key constraint written inside a column definition: the column
+    /// attributes that may follow it (`PRIMARY KEY IDENTITY(1,1)`, `UNIQUE ROWGUIDCOL`, …).
+    private static let inlineKeyStopWords: Set<String> =
+        keyConstraintStopWords.union(columnAttributeWords).union(["COLUMN_SET", "PERSISTED"])
+
+    /// `PRIMARY KEY [CLUSTERED|NONCLUSTERED] [(cols)] [WITH (...)] [ON ds]`. A `PRIMARY` that is
+    /// not followed by `KEY` (`ON PRIMARY`, say) is skipped and yields nothing; the caller's
+    /// loop must always move forward.
     private func parseKeyConstraint(_ cursor: inout DDLTokenCursor, name: String?,
                                     columns inline: [IndexColumn]?) -> KeyConstraintDefinition? {
         let isPrimary = cursor.accept(["PRIMARY", "KEY"])
-        if !isPrimary { cursor.accept("UNIQUE") }
+        guard isPrimary || cursor.accept("UNIQUE") else {
+            cursor.advance()
+            return nil
+        }
         var clustered = isPrimary
         if cursor.accept("CLUSTERED") { clustered = true }
         if cursor.accept("NONCLUSTERED") { clustered = false }
@@ -298,6 +331,7 @@ extension SchemaScriptParser {
         if cursor.word() == "(" { columns = cursor.indexColumns() }
         var key = KeyConstraintDefinition(name: name ?? "", isSystemNamed: name == nil, isPrimaryKey: isPrimary,
                                           isClustered: clustered, columns: columns, dataSpace: "")
+        let stops = inline == nil ? Self.keyConstraintStopWords : Self.inlineKeyStopWords
         while !cursor.isAtEnd {
             if cursor.accept("WITH") {
                 if cursor.word() == "(" {
@@ -310,8 +344,7 @@ extension SchemaScriptParser {
             } else if cursor.accept("ON") {
                 key.dataSpace = cursor.identifier() ?? ""
                 if cursor.word() == "(" { key.partitionColumn = cursor.nameList().first }
-            } else if ["CONSTRAINT", "PRIMARY", "UNIQUE", "CHECK", "REFERENCES", "FOREIGN", "DEFAULT", "NOT",
-                       "NULL"].contains(cursor.word()) {
+            } else if stops.contains(cursor.word()) {
                 break
             } else {
                 cursor.advance()

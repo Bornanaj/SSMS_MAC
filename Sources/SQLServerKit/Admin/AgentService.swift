@@ -117,11 +117,10 @@ public struct AgentService: Sendable {
 
     // MARK: Jobs
 
-    public func jobs() async throws -> [AgentJob] {
-        try await requireAgent()
-        // msdb stores run_date/run_time as integers, so they are rebuilt into a real
-        // datetime rather than shown as 20260825 / 143012.
-        let sql = """
+    /// The jobs list. msdb stores run_date/run_time as integers, so they are rebuilt into
+    /// a real datetime rather than shown as 20260825 / 143012; `next_scheduled_run_date`
+    /// is a datetime already, and agent_datetime takes integers (Msg 257).
+    public static let jobsQuery = """
         SELECT CONVERT(nvarchar(36), j.job_id) AS job_id,
                j.name,
                CAST(j.enabled AS int) AS enabled,
@@ -139,9 +138,7 @@ public struct AgentService: Sendable {
                ISNULL(CONVERT(nvarchar(30),
                    msdb.dbo.agent_datetime(h.run_date, h.run_time), 120), N'') AS last_run,
                ISNULL(RIGHT(N'000000' + CAST(h.run_duration AS nvarchar(10)), 6), N'') AS last_duration,
-               ISNULL(CONVERT(nvarchar(30),
-                   msdb.dbo.agent_datetime(NULLIF(ja.next_scheduled_run_date, 0),
-                                           ja.next_scheduled_run_date), 120), N'') AS next_run,
+               ISNULL(CONVERT(nvarchar(30), ja.next_scheduled_run_date, 120), N'') AS next_run,
                ISNULL(CASE WHEN ja.start_execution_date IS NOT NULL
                             AND ja.stop_execution_date IS NULL
                            THEN N'Executing' ELSE N'Idle' END, N'Idle') AS current_status,
@@ -187,7 +184,10 @@ public struct AgentService: Sendable {
         ) AS step
         ORDER BY j.name
         """
-        let result = try await session.metadataQuery(sql, database: "msdb")
+
+    public func jobs() async throws -> [AgentJob] {
+        try await requireAgent()
+        let result = try await session.metadataQuery(AgentService.jobsQuery, database: "msdb")
         return (result.resultSets.first?.dictionaries() ?? []).map { row in
             AgentJob(
                 id: row.string("job_id"),

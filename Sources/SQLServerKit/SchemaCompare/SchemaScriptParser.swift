@@ -58,6 +58,7 @@ public struct SchemaScriptParser {
         guard !tokens.isEmpty else { return [] }
         let utf16 = Array(batch.utf16)
         var starts: [Int] = []
+        var moduleStarts: Set<Int> = []
         var depth = 0
         var index = 0
         var moduleStarted = false
@@ -71,7 +72,10 @@ public struct SchemaScriptParser {
                 let next = index + 1 < tokens.count ? tokens[index + 1].text.uppercased() : ""
                 if index == 0 || isStatementStart(word, previous: previous, next: next) {
                     starts.append(index)
-                    if isModuleStart(tokens, at: index) { moduleStarted = true }
+                    if isModuleStart(tokens, at: index) {
+                        moduleStarted = true
+                        moduleStarts.insert(index)
+                    }
                 }
             }
             index += 1
@@ -82,8 +86,12 @@ public struct SchemaScriptParser {
             let to: Int = offset + 1 < starts.count ? tokens[starts[offset + 1]].start : utf16.count
             var text = String(decoding: utf16[from..<to], as: UTF16.self)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            while text.hasSuffix(";") { text.removeLast() }
-            text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            // A module is compared and deployed as written, so its final semicolon stays (the
+            // catalog keeps it too); every other statement is parsed and its text dropped.
+            if !moduleStarts.contains(start) {
+                while text.hasSuffix(";") { text.removeLast() }
+                text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
             if !text.isEmpty, text != ";" { result.append(text) }
         }
         return result
@@ -102,7 +110,10 @@ public struct SchemaScriptParser {
     private func isStatementStart(_ word: String, previous: String, next: String) -> Bool {
         if previous == ";" { return true }
         switch word {
-        case "CREATE", "USE", "PRINT", "DECLARE":
+        case "CREATE":
+            // GRANT CREATE TABLE TO … names a permission, not a new statement.
+            return !["GRANT", "DENY", "REVOKE", ","].contains(previous)
+        case "USE", "PRINT", "DECLARE":
             return true
         case "ALTER":
             return !["OR", "GRANT", "DENY", "REVOKE", ","].contains(previous)
@@ -171,10 +182,19 @@ public struct SchemaScriptParser {
 
     private mutating func parseSet(_ cursor: inout DDLTokenCursor) {
         cursor.advance()
-        let option = cursor.word()
-        let value = cursor.word(1) == "ON"
-        if option == "QUOTED_IDENTIFIER" { quotedIdentifier = value }
-        if option == "ANSI_NULLS" { ansiNulls = value }
+        // `SET ANSI_NULLS, QUOTED_IDENTIFIER ON` names several options before the one value.
+        var names: [String] = []
+        while !cursor.isAtEnd {
+            let word = cursor.word()
+            if word == "ON" || word == "OFF" {
+                let value = word == "ON"
+                if names.contains("QUOTED_IDENTIFIER") { quotedIdentifier = value }
+                if names.contains("ANSI_NULLS") { ansiNulls = value }
+                return
+            }
+            if word != "," { names.append(word) }
+            cursor.advance()
+        }
     }
 
     private mutating func parseCreate(_ text: String, _ cursor: inout DDLTokenCursor) {

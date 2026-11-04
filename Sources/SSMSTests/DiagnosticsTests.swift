@@ -169,5 +169,116 @@ func runDiagnosticsTests(_ t: TestRunner) {
                 "sp_readerrorlog takes 1 for the SQL Server log")
         t.equal(ServerLogKind.sqlAgent.rawValue, 2, "and 2 for the Agent log")
         t.equal(ServerLogKind.allCases.count, 2, "two logs")
+
+        // sp_cycle_errorlog lives in master; sp_cycle_agent_errorlog in msdb.
+        t.equal(ErrorLogService.recycleStatement(kind: .sqlServer),
+                "EXEC master.dbo.sp_cycle_errorlog;", "the engine log is recycled from master")
+        t.equal(ErrorLogService.recycleStatement(kind: .sqlAgent),
+                "EXEC msdb.dbo.sp_cycle_agent_errorlog;", "the Agent log from msdb")
+    }
+
+    // MARK: - Admin queries and scripts
+
+    t.suite("query store options query") {
+        func info(_ version: String, engineEdition: Int = 3) -> ServerInfo {
+            var value = ServerInfo()
+            value.productVersion = version
+            value.engineEdition = engineEdition
+            return value
+        }
+        // wait_stats_capture_mode_desc arrived in 2017; asking 2016 for it fails the whole query.
+        let sql2016 = QueryStoreService.optionsQuery(info("13.0.5026.0"))
+        t.expect(!sql2016.contains("wait_stats_capture_mode_desc"),
+                 "2016 is not asked for the wait stats mode", sql2016)
+        t.expect(sql2016.contains("N'' AS WaitStatsMode"), "but the column still comes back")
+        t.expect(QueryStoreService.optionsQuery(info("14.0.3048.4")).contains("o.wait_stats_capture_mode_desc"),
+                 "2017 reports it")
+        t.expect(QueryStoreService.optionsQuery(info("12.0.2000.8", engineEdition: 5))
+                    .contains("o.wait_stats_capture_mode_desc"),
+                 "Azure SQL Database has it whatever version it reports")
+    }
+
+    t.suite("agent jobs query") {
+        // sysjobactivity.next_scheduled_run_date is a datetime, not Agent's packed integers.
+        t.expect(!AgentService.jobsQuery.contains("agent_datetime(NULLIF(ja.next_scheduled_run_date"),
+                 "the next run is not pushed through agent_datetime")
+        t.expect(AgentService.jobsQuery
+                    .contains("CONVERT(nvarchar(30), ja.next_scheduled_run_date, 120), N'') AS next_run"),
+                 "it is formatted as the datetime it is")
+    }
+
+    t.suite("default trace reports") {
+        // The trace folder is cut at the last separator, which is a slash on Linux.
+        for kind in [ServerReportKind.databaseGrowthEvents, .schemaChangeHistory] {
+            let sql = ServerReports.sql(for: kind, info: ServerInfo())
+            t.expect(sql.contains("PATINDEX(N'%[\\/]%', REVERSE(path))"),
+                     "\(kind.rawValue) cuts at either separator", sql)
+            t.expect(!sql.contains("CHARINDEX(N'\\', REVERSE(path))"),
+                     "\(kind.rawValue) does not assume a backslash")
+            t.expect(sql.contains("+ N'log.trc'"), "\(kind.rawValue) reads the rolled-up log.trc")
+        }
+    }
+
+    t.suite("login scripts") {
+        var login = SecurityService.LoginDefinition(name: "app", password: "p@ss'word", mustChangePassword: true,
+                                                   enforcePolicy: false, enforceExpiration: false)
+        let mustChange = (try? SecurityService.createLoginScriptStatic(login)) ?? ""
+        t.expect(mustChange.contains("PASSWORD = N'p@ss''word' MUST_CHANGE, CHECK_POLICY = ON, CHECK_EXPIRATION = ON"),
+                 "MUST_CHANGE forces CHECK_POLICY and CHECK_EXPIRATION on", mustChange)
+
+        login.mustChangePassword = false
+        login.enforceExpiration = true
+        let expiring = (try? SecurityService.createLoginScriptStatic(login)) ?? ""
+        t.expect(expiring.contains("CHECK_POLICY = ON, CHECK_EXPIRATION = ON") && !expiring.contains("MUST_CHANGE"),
+                 "expiration needs the policy on too", expiring)
+
+        login.enforceExpiration = false
+        let plain = (try? SecurityService.createLoginScriptStatic(login)) ?? ""
+        t.expect(plain.contains("CHECK_POLICY = OFF") && !plain.contains("CHECK_EXPIRATION"),
+                 "nothing asked for leaves the policy off", plain)
+
+        login.enforcePolicy = true
+        let policyOnly = (try? SecurityService.createLoginScriptStatic(login)) ?? ""
+        t.expect(policyOnly.contains("CHECK_POLICY = ON, CHECK_EXPIRATION = OFF"),
+                 "the policy alone leaves expiration off", policyOnly)
+    }
+
+    t.suite("configuration change scripts") {
+        func setting(_ name: String, advanced: Bool, configured: String = "0",
+                     running: String = "0") -> ConfigurationSetting {
+            ConfigurationSetting(configurationID: 1, name: name, settingDescription: "", configuredValue: configured,
+                                 runningValue: running, minimum: "0", maximum: "32767", isDynamic: true,
+                                 isAdvanced: advanced)
+        }
+        let maxdop = setting("max degree of parallelism", advanced: true)
+        let shown = setting("show advanced options", advanced: false, configured: "1", running: "1")
+        let hidden = setting("show advanced options", advanced: false)
+
+        let unlocked = ServerConfiguration.changeScriptStatic(setting: maxdop, newValue: "4",
+                                                              showAdvancedOptions: hidden)
+        t.equal(unlocked, """
+                EXEC sp_configure 'show advanced options', 1;
+                RECONFIGURE;
+                EXEC sp_configure 'max degree of parallelism', 4;
+                RECONFIGURE;
+                EXEC sp_configure 'show advanced options', 0;
+                RECONFIGURE;
+                """, "an advanced option is unlocked, then locked again, when show advanced options is off")
+        t.equal(ServerConfiguration.changeScriptStatic(setting: maxdop, newValue: "4", showAdvancedOptions: shown), """
+                EXEC sp_configure 'max degree of parallelism', 4;
+                RECONFIGURE;
+                """, "and left alone when it is already on")
+        let unknown = ServerConfiguration.changeScriptStatic(setting: maxdop, newValue: "4", showAdvancedOptions: nil)
+        t.equal(unknown, unlocked, "when the current value is not known the option is assumed off")
+        let pending = setting("show advanced options", advanced: false, configured: "1", running: "0")
+        let applied = ServerConfiguration.changeScriptStatic(setting: maxdop, newValue: "4",
+                                                             showAdvancedOptions: pending)
+        t.expect(applied.hasPrefix("EXEC sp_configure 'show advanced options', 1;")
+                 && !applied.contains("'show advanced options', 0"),
+                 "a configured but not yet running 1 is applied, not undone", applied)
+        t.expect(!ServerConfiguration.changeScriptStatic(setting: setting("remote access", advanced: false),
+                                                         newValue: "1", showAdvancedOptions: hidden)
+                    .contains("show advanced options"),
+                 "a plain option never touches show advanced options")
     }
 }

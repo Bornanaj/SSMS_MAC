@@ -57,14 +57,29 @@ public struct TDSCollation: Sendable, Hashable, Codable {
 
     public var isEmpty: Bool { raw == 0 && sortId == 0 }
 
+    /// Bit 26 of the collation flags: a `_UTF8` collation (SQL Server 2019+) stores
+    /// char/varchar as UTF-8 rather than in a Windows code page.
+    public var isUTF8: Bool { raw & 0x0400_0000 != 0 }
+
     /// Windows code page implied by the collation's LCID / sort id.
     public var codePage: UInt32 {
+        if isUTF8 { return 65001 }
         if sortId != 0, let cp = TDSCollation.sortIdCodePages[sortId] { return cp }
         return TDSCollation.codePage(forLCID: lcid)
     }
 
     /// Non-exhaustive but covers every code page SQL Server can actually store.
     public static func codePage(forLCID lcid: UInt32) -> UInt32 {
+        // A few locales share a primary language with a locale written in another
+        // script, so they are keyed on the full LCID before the primary-language table.
+        switch lcid & 0xFFFF {
+        case 0x0804, 0x1004: return 936                 // Chinese (PRC, Singapore): Simplified
+        case 0x0C1A, 0x1C1A, 0x201A: return 1251        // Serbian and Bosnian (Cyrillic)
+        case 0x082C, 0x0843: return 1251                // Azeri and Uzbek (Cyrillic)
+        case 0x0450, 0x046D, 0x0485: return 1251        // Mongolian (Cyrillic), Bashkir, Yakut
+        case 0x0442: return 1250                        // Turkmen
+        default: break
+        }
         let primary = lcid & 0x3FF
         switch primary {
         case 0x01: return 1256 // Arabic

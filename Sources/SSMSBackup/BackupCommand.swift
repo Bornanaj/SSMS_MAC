@@ -6,14 +6,24 @@ import SQLServerKit
 struct BackupCommand {
     static func main() async {
         let raw = Array(CommandLine.arguments.dropFirst())
+        // Help is answered wherever it is asked for, and never counts as a bad command line.
+        if raw.contains(where: { $0 == "--help" || $0 == "-h" }) {
+            print(usage)
+            exit(ExitCode.success.rawValue)
+        }
         guard let command = raw.first, !command.hasPrefix("-") else {
             print(usage)
             exit(ExitCode.usage.rawValue)
         }
-        let args = Arguments(Array(raw.dropFirst()))
+        let args = Arguments(Array(raw.dropFirst()), booleanFlags: booleanFlags)
         do {
             let code: ExitCode
-            switch command.lowercased() {
+            let name = command.lowercased()
+            if let known = options[name] {
+                try args.validate(known: known, allowsPositional: name == "restore" || name == "verify",
+                                  tool: "ssms-backup")
+            }
+            switch name {
             case "backup": code = try await runBackup(args)
             case "restore": code = try await runRestore(args)
             case "verify": code = try await runVerify(args)
@@ -23,7 +33,7 @@ struct BackupCommand {
             case "analyze": code = try await runAnalyze(args)
             case "log-shipping": code = try await runLogShipping(args)
             case "certificates": code = try await runCertificates(args)
-            case "help", "--help", "-h":
+            case "help":
                 print(usage)
                 code = .success
             default:
@@ -39,6 +49,56 @@ struct BackupCommand {
             exit(ExitCode.error.rawValue)
         }
     }
+
+    // MARK: - Option names
+
+    /// Switches that never take the next word as their value, so `--replace x.bak` restores
+    /// x.bak instead of restoring the msdb history over the database WITH REPLACE.
+    static let booleanFlags: Set<String> = [
+        "quiet", "verbose", "script", "verify-certificate", "secondary-verify-certificate",
+        "copy-only", "no-truncate", "all-databases", "user-databases", "system-databases", "overwrite",
+        "erase-before", "checksum", "no-checksum", "continue-after-error", "verify", "preferred-replica-only",
+        "secondary-copy-only", "full-only", "replace", "no-kill", "original-locations", "norecovery", "standby",
+        "checkdb", "fix-orphans", "no-orphan-check", "keep-cdc", "keep-replication", "assert-backed-up",
+        "create-backup", "create-verify", "latest-set", "no-checkdb", "status", "no-init"
+    ]
+
+    static let commonOptions: Set<String> = ConnectionArguments.optionNames(prefix: "").union(["quiet", "verbose"])
+
+    static let backupOptionNames: Set<String> = [
+        "database", "databases", "all-databases", "user-databases", "system-databases", "exclude", "type", "copy-only",
+        "no-truncate", "folder", "name-format", "url", "s3-region", "split", "mirror", "overwrite", "erase-files",
+        "erase-before", "erase-mirror-files", "compression", "encrypt-certificate", "encrypt-algorithm", "checksum",
+        "no-checksum", "continue-after-error", "verify", "retries", "retry-interval", "max-transfer-size",
+        "buffer-count", "block-size", "preferred-replica-only", "secondary-copy-only", "backup-name", "description",
+        "mail-to", "mail-on", "mail-profile", "template"
+    ]
+
+    /// What each command accepts; a name outside its list is a usage error.
+    static let options: [String: Set<String>] = [
+        "backup": commonOptions.union(backupOptionNames).union(["save-template", "script"]),
+        "restore": commonOptions.union([
+            "database", "source", "files", "stop-at", "backup-set-id", "full-only", "replace", "no-kill", "tail-log",
+            "data-folder", "log-folder", "original-locations", "norecovery", "standby", "undo-file", "checkdb", "drop",
+            "fix-orphans", "no-orphan-check", "keep-cdc", "keep-replication", "s3-region", "script"
+        ]),
+        "verify": commonOptions.union(["files"]),
+        "status": commonOptions.union(["full-hours", "log-minutes", "assert-backed-up"]),
+        "history": commonOptions.union(["days", "database", "output", "format", "scope"]),
+        "report": commonOptions.union(["days", "database", "output", "format", "scope"]),
+        "jobs": commonOptions.union(backupOptionNames).union([
+            "create-backup", "create-verify", "source", "destination", "latest-set", "no-checkdb", "drop",
+            "data-folder", "log-folder", "schedule", "run", "delete", "enable", "disable", "log", "script"
+        ]),
+        "analyze": commonOptions.union(["database"]),
+        "log-shipping": commonOptions.union(ConnectionArguments.optionNames(prefix: "secondary")).union([
+            "status", "database", "secondary-database", "backup-folder", "share", "copy-folder", "standby", "every",
+            "retention-minutes", "no-init", "script"
+        ]),
+        "certificates": commonOptions.union([
+            "create", "years", "subject", "master-key-password", "export", "key-password", "file", "import"
+        ])
+    ]
 
     // MARK: - Options
 
@@ -167,12 +227,10 @@ struct BackupCommand {
         let runner = BackupRunner(session: session, options: options, capabilities: capabilities)
         if args.flag("script") {
             let scripter = BackupScripter(options: options, capabilities: capabilities)
+            let date = capabilities.serverTime ?? Date()
             for entry in try await runner.resolveDatabases() {
                 if let reason = entry.skipReason { print("-- \(entry.name): \(reason)"); continue }
-                let plan = scripter.plan(database: entry.name, date: capabilities.serverTime ?? Date())
-                print(scripter.backupStatement(database: entry.name, plan: plan))
-                if options.verify { print(scripter.verifyStatement(plan: plan)) }
-                print("GO")
+                print(backupScript(for: entry.name, scripter: scripter, options: options, date: date))
             }
             return .success
         }
@@ -207,6 +265,59 @@ struct BackupCommand {
         log(result.summary, quiet: quiet)
         if result.hasErrors { return .error }
         return result.hasWarnings ? .warning : .success
+    }
+
+    /// The batches `BackupRunner` runs for one database, in the order it runs them: the
+    /// folders are created, the files are checked when overwriting is off, old files are
+    /// deleted before or after the backup as the retention rule says, and the backup carries
+    /// its expanded name and description. Replica checks happen at run time and are noted.
+    static func backupScript(for database: String, scripter: BackupScripter, options: BackupOptions,
+                             date: Date) -> String {
+        let plan = scripter.plan(database: database, date: date)
+        var batches: [String] = []
+        var preparation: [String] = ["-- \(database)"]
+        if options.checkPreferredReplica || options.secondaryReplicaCopyOnly {
+            preparation.append("-- The run checks sys.fn_hadr_backup_is_preferred_replica / is_primary_replica first.")
+        }
+        if !plan.isURL {
+            for folder in [plan.folder] + plan.mirrorFolders where !folder.isEmpty {
+                preparation.append("EXEC master.dbo.xp_create_subdir \(SQLIdentifier.literal(folder));")
+            }
+            if !options.overwrite { preparation.append(BackupScripter.existenceCheck(paths: plan.allFiles)) }
+        }
+        batches.append(preparation.joined(separator: "\n"))
+        let retention = retentionScripts(for: database, plan: plan, options: options)
+        if options.retention.beforeBackup { batches += retention }
+        let context = scripter.context(database: database, date: date)
+        let name = options.backupName.isEmpty ? nil : BackupFileNaming.expand(options.backupName, context: context)
+        let description = options.backupDescription.isEmpty ? nil
+            : BackupFileNaming.expand(options.backupDescription, context: context)
+        batches.append(scripter.backupStatement(database: database, plan: plan, copyOnly: options.copyOnly,
+                                                name: name, description: description))
+        if options.verify { batches.append(scripter.verifyStatement(plan: plan)) }
+        if !options.retention.beforeBackup { batches += retention }
+        return batches.map { $0 + "\nGO" }.joined(separator: "\n")
+    }
+
+    /// The retention batches the run executes: none for URL backups, one for the folder and
+    /// one per mirror folder, exactly as `BackupRunner.retention` builds them.
+    static func retentionScripts(for database: String, plan: BackupFilePlan, options: BackupOptions) -> [String] {
+        guard !plan.isURL else { return [] }
+        var scripts: [String] = []
+        if options.retention.isEnabled {
+            scripts.append(BackupScripter.retentionScript(rule: options.retention, type: options.type,
+                                                          databaseExpression: SQLIdentifier.literal(database),
+                                                          folderExpression: SQLIdentifier.literal(plan.folder)))
+        }
+        if options.mirrorRetention.isEnabled {
+            for (offset, folder) in plan.mirrorFolders.enumerated() {
+                scripts.append(BackupScripter.retentionScript(rule: options.mirrorRetention, type: options.type,
+                                                              databaseExpression: SQLIdentifier.literal(database),
+                                                              folderExpression: SQLIdentifier.literal(folder),
+                                                              suffix: "m\(offset)"))
+            }
+        }
+        return scripts
     }
 
     // MARK: - restore
@@ -283,9 +394,14 @@ struct BackupCommand {
             options.logFolder = args.string("log-folder") ?? ""
         }
         if args.flag("norecovery") { options.recoveryState = .nonOperational }
-        if let undo = args.string("standby") {
+        if args.flag("standby") {
             options.recoveryState = .readOnly
-            if undo != "true" { options.undoFile = undo }
+            // `--standby` is a switch, so the undo file is `--undo-file` (or `--standby=<file>`).
+            if let undo = args.string("undo-file") {
+                options.undoFile = undo
+            } else if let value = args.string("standby"), !Arguments.isBooleanLiteral(value) {
+                options.undoFile = value
+            }
         }
         options.orphanCheck = !args.flag("no-orphan-check")
         options.fixOrphanedUsers = args.flag("fix-orphans")
@@ -657,12 +773,16 @@ struct BackupCommand {
       ssms-backup analyze  --server S --database DB
       ssms-backup log-shipping --server PRIMARY --database DB --secondary-server STANDBY …
       ssms-backup certificates --server S [--create NAME | --export NAME | --import FILE]
+      ssms-backup help   (also --help / -h)
 
     CONNECTION
       --server <host[,port]|host\\instance>  --user <login>  --password <pw>
         (or SSMS_USER / SSMS_PASSWORD, SQL_USER / SQL_PASSWORD)
       --auth sql|windows|entra|token  --domain <domain>  --token <access token>
       --encrypt required|strict|off  --verify-certificate
+      --quiet (no progress on stderr)  --verbose
+      Switches like --replace take an optional true/false and never swallow a file name;
+      a misspelled option is an error (exit 64).
 
     BACKUP
       --database a,b | --all-databases | --user-databases | --system-databases [--exclude a,b]
@@ -686,7 +806,7 @@ struct BackupCommand {
       --backup-name T  --description T
       --mail-to a@x;b@y [--mail-on error|warning|always] [--mail-profile P]   (Database Mail)
       --template file.json          start from a saved template; --save-template file.json saves one
-      --script                      print the T-SQL instead of running it
+      --script                      print the T-SQL the run would execute instead of running it
 
     RESTORE
       --source DB                   restore from DB's backup history (default: the target's own)
@@ -695,7 +815,7 @@ struct BackupCommand {
       --backup-set-id N             restore up to this backup set   --full-only   just the latest full
       --replace  --no-kill  --tail-log <file>
       --data-folder F --log-folder F | --original-locations
-      --norecovery | --standby [undo file]
+      --norecovery | --standby [--undo-file <file>]
       --checkdb  --drop always|success  --fix-orphans  --no-orphan-check  --keep-cdc  --keep-replication
       --script  --verbose
 

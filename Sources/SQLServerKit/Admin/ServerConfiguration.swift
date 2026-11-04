@@ -13,6 +13,19 @@ public struct ConfigurationSetting: Sendable, Hashable, Identifiable {
     public var isDynamic: Bool
     public var isAdvanced: Bool
 
+    public init(configurationID: Int, name: String, settingDescription: String, configuredValue: String,
+                runningValue: String, minimum: String, maximum: String, isDynamic: Bool, isAdvanced: Bool) {
+        self.configurationID = configurationID
+        self.name = name
+        self.settingDescription = settingDescription
+        self.configuredValue = configuredValue
+        self.runningValue = runningValue
+        self.minimum = minimum
+        self.maximum = maximum
+        self.isDynamic = isDynamic
+        self.isAdvanced = isAdvanced
+    }
+
     /// True when the value has been set but needs RECONFIGURE or a restart.
     public var isPending: Bool { configuredValue != runningValue }
 
@@ -156,17 +169,35 @@ public struct ServerConfiguration: Sendable {
     // MARK: Write
 
     /// sp_configure needs "show advanced options" on before an advanced setting is
-    /// reachable, and RECONFIGURE afterwards for the value to take effect.
-    public func changeScript(setting: ConfigurationSetting, newValue: String) -> String {
+    /// reachable, and RECONFIGURE afterwards for the value to take effect. `settings` is
+    /// the list the caller already has: its "show advanced options" row says whether that
+    /// option needs switching on first; without it the option is assumed off.
+    public func changeScript(setting: ConfigurationSetting, newValue: String,
+                             settings: [ConfigurationSetting] = []) -> String {
+        ServerConfiguration.changeScriptStatic(
+            setting: setting, newValue: newValue,
+            showAdvancedOptions: settings.first { $0.name == "show advanced options" })
+    }
+
+    /// Pure string building. `showAdvancedOptions` is the current "show advanced options"
+    /// row, nil when the caller does not know it.
+    public static func changeScriptStatic(setting: ConfigurationSetting, newValue: String,
+                                          showAdvancedOptions: ConfigurationSetting?) -> String {
+        // An advanced option is only reachable while "show advanced options" is in use, so
+        // it is switched on when it is not, and back off afterwards unless it was already
+        // configured on; when it is on, it is left alone rather than silently switched off.
+        let running = showAdvancedOptions?.runningValue.trimmingCharacters(in: .whitespaces) == "1"
+        let configured = showAdvancedOptions?.configuredValue.trimmingCharacters(in: .whitespaces) == "1"
+        let unlock = setting.isAdvanced && !running
         var lines: [String] = []
-        if setting.isAdvanced {
+        if unlock {
             lines.append("EXEC sp_configure 'show advanced options', 1;")
             lines.append("RECONFIGURE;")
         }
         let name = setting.name.replacingOccurrences(of: "'", with: "''")
         lines.append("EXEC sp_configure '\(name)', \(newValue);")
         lines.append("RECONFIGURE\(setting.isDynamic ? "" : " WITH OVERRIDE");")
-        if setting.isAdvanced {
+        if unlock && !configured {
             lines.append("EXEC sp_configure 'show advanced options', 0;")
             lines.append("RECONFIGURE;")
         }

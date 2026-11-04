@@ -59,6 +59,36 @@ The promise handed to the channel handler is also created inside the same event-
 that hands it over, so a rejected request can never strand an unfulfilled promise — NIO
 traps on those in debug builds.
 
+`SQLServerSession.metadataQuery` has a second lock of its own. A catalog read for a
+database other than the connection's current one is two requests — `USE [db]` and the
+query — and an actor's `await` lets another caller in between them. Two overlapping
+reads for different databases (IntelliSense warming one tab's catalog while the Object
+Explorer expands another database) interleaved as `USE db1`, `USE db2`, *query 1*,
+*query 2*, so the first caller got the second one's tables. `tdscli concurrency` fires
+twelve overlapping reads and checks that each answered from the database it asked for;
+without the lock nine of them did not.
+
+## A token split across packets is not re-parsed on every packet
+
+The parser rewinds to the start of a token that is only partially present, and the
+channel handler used to call it again on every packet. For one `varbinary(max)` row that
+is O(packets²): a 16 MB value was copied once per 4 KB packet and took eleven seconds to
+arrive. `TDSConnectionHandler` now remembers how much was in the buffer when a parse
+came up short and does not try again until the buffer has doubled, which keeps the total
+work linear; the last packet of a message always parses, so nothing waits for data it
+does not need. The same 16 MB value now arrives in well under a second.
+
+## SET SHOWPLAN_XML travels alone
+
+`SET SHOWPLAN_XML ON` must be the only statement in its batch (Msg 1067). It was sent in
+the same batch as the SET block SSMS emits before every run, the batch failed, the
+failure was discarded, and "Display Estimated Execution Plan" then *executed* the script
+instead of planning it. `QueryExecutor.preambleBatches` keeps it in a batch of its own,
+switches it off first and alone afterwards (while it is on no other batch executes), and
+a preamble that fails now ends the run with the server's message rather than letting the
+script run in whatever database the connection happened to be in.
+
+
 ## Values are decoded, not converted
 
 `TDSValue` keeps SQL Server's own representation:
@@ -72,6 +102,17 @@ traps on those in debug builds.
 - Non-Unicode text is decoded through the code page implied by the column's collation.
   `CFStringConvertWindowsCodepageToEncoding` covers every code page SQL Server can store,
   including 1256 for Persian and Arabic collations.
+
+## The formatter only re-cases words that are certainly keywords
+
+The lexer classifies by word list, so a column called `Date`, `Year`, `Key` or `Count`
+lexes as a type or a function, and the formatter used to upper-case it along with the
+real keywords. Under a case-sensitive or binary collation the formatted query then
+failed with "Invalid column name 'DATE'". A word after a dot is always a name and is
+never touched; a function is only re-cased when it is called (`GETDATE()`), and a type
+only where a type can appear (`CAST(x AS int)`, `CONVERT(date, x)`, `DECLARE @d datetime`,
+`varchar(50)`). `GO 5` keeps its count on the GO line, because the batch splitter would
+otherwise hand the `5` to the next batch as T-SQL.
 
 ## CRLF is one Character in Swift
 

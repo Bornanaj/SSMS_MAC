@@ -3,11 +3,22 @@ import TDSKit
 import SQLServerKit
 
 /// `--name value`, `--name=value` and bare `--flag` arguments. Repeated names accumulate.
+///
+/// Names in `booleanFlags` never take the next word as their value — `--replace x.bak`
+/// leaves `x.bak` as the file to restore — unless that word is an explicit `true`, `false`,
+/// `yes`, `no`, `1` or `0`. Every name seen is kept so a command can refuse the ones it does
+/// not know.
 struct Arguments {
     private(set) var values: [String: [String]] = [:]
     private(set) var positional: [String] = []
+    /// Every option name given, lowercased, in order.
+    private(set) var names: [String] = []
 
-    init(_ arguments: [String]) {
+    static func isBooleanLiteral(_ text: String) -> Bool {
+        ["true", "false", "yes", "no", "1", "0"].contains(text.lowercased())
+    }
+
+    init(_ arguments: [String], booleanFlags: Set<String> = []) {
         var index = 0
         while index < arguments.count {
             let argument = arguments[index]
@@ -18,10 +29,15 @@ struct Arguments {
                     value = String(name[name.index(after: equals)...])
                     name = String(name[..<equals])
                 } else if index + 1 < arguments.count, !arguments[index + 1].hasPrefix("--") {
-                    value = arguments[index + 1]
-                    index += 1
+                    let next = arguments[index + 1]
+                    if !booleanFlags.contains(name.lowercased()) || Self.isBooleanLiteral(next) {
+                        value = next
+                        index += 1
+                    }
                 }
-                values[name.lowercased(), default: []].append(value ?? "true")
+                let key = name.lowercased()
+                names.append(key)
+                values[key, default: []].append(value ?? "true")
             } else {
                 positional.append(argument)
             }
@@ -47,6 +63,17 @@ struct Arguments {
         guard let text = string(name) else { return nil }
         guard let value = Int(text) else { throw CLIError.usage("--\(name) expects a number, not '\(text)'.") }
         return value
+    }
+
+    /// A misspelled option used to be ignored, which silently disabled whatever it was meant
+    /// to do; now it is a usage error, as is a stray word when the command takes no files.
+    func validate(known: Set<String>, allowsPositional: Bool, tool: String) throws {
+        if let unknown = names.first(where: { !known.contains($0) }) {
+            throw CLIError.usage("Unknown option --\(unknown). Run '\(tool) help' for the options.")
+        }
+        if !allowsPositional, let stray = positional.first {
+            throw CLIError.usage("Unexpected argument '\(stray)'. Options start with --; run '\(tool) help' for the list.")
+        }
     }
 }
 
@@ -76,6 +103,12 @@ enum ExitCode: Int32 {
 struct ConnectionArguments {
     let prefix: String
     let args: Arguments
+
+    /// The option names a connection with this prefix reads.
+    static func optionNames(prefix: String) -> Set<String> {
+        let names = ["server", "user", "password", "auth", "domain", "token", "encrypt", "verify-certificate"]
+        return Set(names.map { prefix.isEmpty ? $0 : "\(prefix)-\($0)" })
+    }
 
     private func name(_ base: String) -> String { prefix.isEmpty ? base : "\(prefix)-\(base)" }
 

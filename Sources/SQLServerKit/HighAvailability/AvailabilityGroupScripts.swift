@@ -318,7 +318,7 @@ public enum AvailabilityGroupScripts {
         return """
         ALTER AVAILABILITY GROUP \(try name(group))
             MODIFY LISTENER \(try literal(listenerName, what: "listener name"))
-            (ADD IP (\(try ipPair(address))));
+            (ADD IP ((\(try ipPair(address)))));
         """
     }
 

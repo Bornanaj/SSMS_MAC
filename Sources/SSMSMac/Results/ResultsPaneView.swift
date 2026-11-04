@@ -11,8 +11,8 @@ struct ResultsPaneView: View {
     /// Opens the Save Results dialog; the pane itself owns no sheet state.
     var onSaveResults: () -> Void
 
-    @State private var preferences = QueryResultsPreferences.load()
-
+    /// One source for the mode: the Query menu, the pane's own menu and Query Options
+    /// all read and write `AppSettings.resultsOutputMode`.
     private var outputMode: QueryOutputMode {
         settings.resultsOutputMode == "text" ? .text : .grid
     }
@@ -158,39 +158,19 @@ struct ResultsPaneView: View {
     }
 
     /// SSMS's "Results to Text": every result set rendered as fixed-width columns in
-    /// one scrollable document, the way sqlcmd prints them.
+    /// one scrollable document, the way sqlcmd prints them. The text is formatted by
+    /// the tab once per run; the view only displays it.
     @ViewBuilder
     private var textResults: some View {
-        if tab.resultSets.isEmpty && tab.messages.isEmpty {
-            ContentUnavailableView(tab.isExecuting ? "Running…" : "No results",
-                                   systemImage: "text.alignleft",
+        if tab.isExecuting {
+            ContentUnavailableView("Running…", systemImage: "text.alignleft",
+                                   description: Text("The output appears when the batch finishes."))
+        } else if tab.textOutput.isEmpty {
+            ContentUnavailableView("No results", systemImage: "text.alignleft",
                                    description: Text("Execute a query to see output here."))
         } else {
-            ScrollView([.vertical, .horizontal]) {
-                Text(textOutput)
-                    .font(.system(size: settings.gridFontSize, design: .monospaced))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(10)
-            }
-            .background(Color(nsColor: .textBackgroundColor))
+            PlainTextOutputView(text: tab.textOutput, font: settings.gridFont)
         }
-    }
-
-    private var textOutput: String {
-        let formatter = TextResultFormatter(style: preferences.textStyle)
-        var blocks: [String] = []
-        for model in tab.resultSets {
-            blocks.append(formatter.format(columns: model.columns, rows: model.rows))
-            blocks.append(formatter.rowsAffected(Int64(model.rowCount)))
-        }
-        for message in tab.messages where message.kind == .info {
-            blocks.append(message.text)
-        }
-        for message in tab.messages where message.kind == .error {
-            blocks.append(message.displayText)
-        }
-        return blocks.joined(separator: "\n")
     }
 
     @ViewBuilder
@@ -250,6 +230,61 @@ struct ResultsPaneView: View {
             Text(label).foregroundStyle(.secondary)
             Text(value).font(.system(.body, design: .monospaced))
         }
+    }
+}
+
+/// A read-only, selectable NSTextView for large plain-text output. A SwiftUI `Text`
+/// lays the whole string out as one glyph run on every update, which stalls on a few
+/// hundred thousand rows; the text view lays out only what is on screen.
+struct PlainTextOutputView: NSViewRepresentable {
+    var text: String
+    var font: NSFont
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+        scrollView.drawsBackground = true
+
+        let textView = NSTextView()
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isRichText = false
+        textView.usesFindBar = true
+        textView.isIncrementalSearchingEnabled = true
+        textView.textContainerInset = NSSize(width: 8, height: 8)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = true
+        textView.autoresizingMask = []
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
+                                  height: CGFloat.greatestFiniteMagnitude)
+        textView.textContainer?.widthTracksTextView = false
+        textView.textContainer?.size = NSSize(width: CGFloat.greatestFiniteMagnitude,
+                                              height: CGFloat.greatestFiniteMagnitude)
+        scrollView.documentView = textView
+        apply(to: textView)
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let textView = scrollView.documentView as? NSTextView else { return }
+        apply(to: textView)
+    }
+
+    private func apply(to textView: NSTextView) {
+        // Comparing first keeps a keystroke in the editor from re-laying the output.
+        if textView.font != font {
+            textView.font = font
+            textView.typingAttributes = [.font: font, .foregroundColor: NSColor.textColor]
+        }
+        if textView.string != text {
+            textView.string = text
+            textView.textStorage?.addAttributes([.font: font, .foregroundColor: NSColor.textColor],
+                                                range: NSRange(location: 0, length: (text as NSString).length))
+        }
+        textView.minSize = textView.enclosingScrollView?.contentSize ?? .zero
     }
 }
 

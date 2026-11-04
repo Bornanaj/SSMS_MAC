@@ -93,8 +93,9 @@ struct SchemaCompareWindow: View {
             } label: {
                 Label("Deploy", systemImage: "arrow.right.doc.on.clipboard")
             }
-            .disabled(model.comparison == nil || model.deploymentCount == 0 || model.isBusy)
-            .help("Review, script and deploy the selected differences")
+            .disabled(model.comparison == nil || model.deploymentCount == 0 || model.isBusy || model.resultsAreStale)
+            .help(model.resultsAreStale ? "The project changed since the last comparison: refresh first"
+                  : "Review, script and deploy the selected differences")
             Menu {
                 ForEach(CompareReportFormat.allCases) { format in
                     Button(format.title) { model.exportReport(format) }
@@ -289,6 +290,10 @@ struct SchemaCompareWindow: View {
             if model.isBusy {
                 ProgressView(value: model.progress).frame(width: 160)
                 Text(model.progressText).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            } else if model.resultsAreStale {
+                Label("Options, mappings or filters changed since this comparison — press Refresh before deploying.",
+                      systemImage: "exclamationmark.triangle")
+                    .font(.caption).foregroundStyle(.orange).lineLimit(2)
             } else {
                 CompareStatusLine(text: model.statusText, isError: model.statusIsError)
             }

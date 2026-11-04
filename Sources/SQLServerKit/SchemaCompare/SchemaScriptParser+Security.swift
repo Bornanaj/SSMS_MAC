@@ -139,7 +139,8 @@ extension SchemaScriptParser {
         }
         let body = SchemaScriptWriter().tableTypeBody(quotedName: quoted, columns: table.columns, indexes: indexes,
                                                       checks: checks.map(\.definition),
-                                                      memoryOptimized: memoryOptimized)
+                                                      memoryOptimized: memoryOptimized,
+                                                      defaultCollation: defaultCollation)
         add(SchemaObject(type: .tableType, schema: schema, name: name, body: body))
     }
 

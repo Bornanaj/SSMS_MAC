@@ -1,9 +1,12 @@
 import SwiftUI
 import SQLServerKit
 
-/// Where a query tab sends its rows, mirroring SSMS's Results To Grid / Text / File.
+/// Where a query tab sends its rows, mirroring SSMS's Results To Grid / Text. Results
+/// to File is the Save Results dialog (Query ▸ Results to File…), which writes a
+/// finished run rather than redirecting one. The raw values are what
+/// `AppSettings.resultsOutputMode` stores.
 enum QueryOutputMode: String, Codable, CaseIterable, Identifiable, Sendable {
-    case grid, text, file
+    case grid, text
 
     var id: String { rawValue }
 
@@ -11,7 +14,6 @@ enum QueryOutputMode: String, Codable, CaseIterable, Identifiable, Sendable {
         switch self {
         case .grid: return "Results to Grid"
         case .text: return "Results to Text"
-        case .file: return "Results to File"
         }
     }
 
@@ -19,15 +21,15 @@ enum QueryOutputMode: String, Codable, CaseIterable, Identifiable, Sendable {
         switch self {
         case .grid: return "tablecells"
         case .text: return "text.alignleft"
-        case .file: return "doc.text"
         }
     }
 }
 
-/// The Results page of Query Options. Persisted on its own because it describes how the
-/// app renders rows, not how the server runs the batch.
+/// The text-rendering half of Query Options ▸ Results. Persisted on its own because
+/// it describes how the app renders rows, not how the server runs the batch. The
+/// output mode itself lives in `AppSettings.resultsOutputMode`, which the Query menu
+/// and the results pane bind to as well.
 struct QueryResultsPreferences: Codable, Hashable, Sendable {
-    var outputMode: QueryOutputMode = .grid
     var maxCharactersPerColumn: Int = 256
     var includeColumnHeaders: Bool = true
 
@@ -62,16 +64,21 @@ struct QueryOptionsSheet: View {
 
     private enum Page: Hashable { case execution, results }
 
-    private let onApply: (QuerySetOptions) -> Void
+    private let onApply: (QuerySetOptions, QueryOutputMode) -> Void
 
     @State private var options: QuerySetOptions
     @State private var results: QueryResultsPreferences
+    @State private var outputMode: QueryOutputMode
     @State private var page: Page = .execution
 
-    init(options: QuerySetOptions, onApply: @escaping (QuerySetOptions) -> Void) {
+    /// `onApply` receives the SET options for the current window and the output mode,
+    /// which the caller stores app-wide; the text preferences are saved here.
+    init(options: QuerySetOptions, outputMode: QueryOutputMode,
+         onApply: @escaping (QuerySetOptions, QueryOutputMode) -> Void) {
         self.onApply = onApply
         _options = State(initialValue: options)
         _results = State(initialValue: QueryResultsPreferences.load())
+        _outputMode = State(initialValue: outputMode)
     }
 
     private static let isolationLevels: [String] = [
@@ -202,7 +209,7 @@ struct QueryOptionsSheet: View {
     private var resultsPage: some View {
         Form {
             Section("Output") {
-                Picker("Display results in", selection: $results.outputMode) {
+                Picker("Display results in", selection: $outputMode) {
                     ForEach(QueryOutputMode.allCases) { mode in
                         Label(mode.title, systemImage: mode.iconName).tag(mode)
                     }
@@ -211,7 +218,7 @@ struct QueryOptionsSheet: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            Section("Text and file output") {
+            Section("Text output") {
                 TextField("Maximum characters per column",
                           value: $results.maxCharactersPerColumn, format: .number)
                 Text("Between 1 and 65535. Wider values are truncated, never wrapped.")
@@ -225,10 +232,10 @@ struct QueryOptionsSheet: View {
     }
 
     private var outputModeExplanation: String {
-        switch results.outputMode {
+        switch outputMode {
         case .grid: return "Rows appear in a sortable grid, one tab per result set."
-        case .text: return "Rows are padded into fixed width columns, like SSMS text mode."
-        case .file: return "The text rendering is written to a .rpt file after the batch finishes."
+        case .text: return "Rows are padded into fixed width columns, like SSMS text mode. "
+            + "Query ▸ Results to File… saves a finished run to disk."
         }
     }
 
@@ -237,6 +244,7 @@ struct QueryOptionsSheet: View {
     private func resetToDefaults() {
         options = QuerySetOptions()
         results = QueryResultsPreferences()
+        outputMode = .grid
     }
 
     private func apply() {
@@ -246,7 +254,7 @@ struct QueryOptionsSheet: View {
         options.rowCountLimit = max(0, options.rowCountLimit)
         results.maxCharactersPerColumn = min(max(results.maxCharactersPerColumn, 1), 65_535)
         results.save()
-        onApply(options)
+        onApply(options, outputMode)
         dismiss()
     }
 }

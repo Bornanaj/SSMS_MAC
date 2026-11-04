@@ -351,7 +351,7 @@ public enum CatalogQueries {
             CAST(i.is_unique_constraint AS int) AS IsUniqueConstraint,
             CAST(i.is_disabled AS int)          AS IsDisabled,
             CAST(i.is_padded AS int)            AS IsPadded,
-            CAST(i.fill_factor AS int)          AS FillFactor,
+            CAST(i.fill_factor AS int)          AS [FillFactor],
             CAST(i.has_filter AS int)           AS HasFilter,
             ISNULL(i.filter_definition, N'')    AS FilterDefinition,
             ISNULL(ds.name, N'')                AS DataSpaceName,
@@ -910,18 +910,20 @@ public enum CatalogQueries {
         return """
         SELECT \(top(limit))
             m.SortRank, m.ObjectId, m.SchemaName, m.ObjectName, m.ParentName,
-            m.ObjectType, m.MatchKind
+            m.ObjectType, m.MatchKind, m.ParentType
         FROM (
             SELECT
                 CAST(0 AS int)      AS SortRank,
                 o.object_id         AS ObjectId,
                 s.name              AS SchemaName,
                 o.name              AS ObjectName,
-                CAST(N'' AS nvarchar(128)) AS ParentName,
+                CAST(ISNULL(po.name, N'') AS nvarchar(128)) AS ParentName,
                 CAST(RTRIM(o.type) AS nvarchar(4)) AS ObjectType,
-                CAST(N'object' AS nvarchar(8))     AS MatchKind
+                CAST(N'object' AS nvarchar(8))     AS MatchKind,
+                CAST(ISNULL(RTRIM(po.type), N'') AS nvarchar(4)) AS ParentType
             FROM sys.objects AS o
             JOIN sys.schemas AS s ON s.schema_id = o.schema_id
+            LEFT JOIN sys.objects AS po ON po.object_id = o.parent_object_id AND o.type = 'TR'
             WHERE o.is_ms_shipped = 0
               AND o.type IN ('U', 'V', 'P', 'PC', 'FN', 'IF', 'TF', 'FS', 'FT', 'AF', 'SN', 'SO', 'TR')
               AND o.name LIKE \(pattern) ESCAPE N'\\'
@@ -933,7 +935,8 @@ public enum CatalogQueries {
                 c.name,
                 CAST(o2.name AS nvarchar(128)),
                 CAST(RTRIM(o2.type) AS nvarchar(4)),
-                CAST(N'column' AS nvarchar(8))
+                CAST(N'column' AS nvarchar(8)),
+                CAST(RTRIM(o2.type) AS nvarchar(4))
             FROM sys.columns AS c
             JOIN sys.objects AS o2 ON o2.object_id = c.object_id
             JOIN sys.schemas AS s2 ON s2.schema_id = o2.schema_id

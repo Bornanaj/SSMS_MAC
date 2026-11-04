@@ -15,6 +15,10 @@ struct ActivityMonitorView: View {
     @State private var autoRefresh = true
     @State private var isLoading = false
     @State private var errorText: String?
+    /// A failed KILL is shown in the footer; it must not replace the whole window the
+    /// way a failed read does, and the next auto-refresh must not wipe it.
+    @State private var actionError: String?
+    @State private var pendingKill: Int?
     @State private var selectedSession: ActivitySession?
     @State private var refreshTask: Task<Void, Never>?
 
@@ -52,6 +56,19 @@ struct ActivityMonitorView: View {
         .task { await refresh() }
         .onAppear { startAutoRefresh() }
         .onDisappear { refreshTask?.cancel() }
+        .confirmationDialog("Kill process \(pendingKill ?? 0)?",
+                            isPresented: Binding(get: { pendingKill != nil },
+                                                 set: { if !$0 { pendingKill = nil } }),
+                            titleVisibility: .visible) {
+            Button("Kill Process", role: .destructive) {
+                if let id = pendingKill { kill(id) }
+                pendingKill = nil
+            }
+            Button("Cancel", role: .cancel) { pendingKill = nil }
+        } message: {
+            Text("The session's running request is stopped and any open transaction "
+                 + "is rolled back. This cannot be undone.")
+        }
     }
 
     private var header: some View {
@@ -141,7 +158,7 @@ struct ActivityMonitorView: View {
                 }
                 .contextMenu(forSelectionType: Int.self) { ids in
                     if let id = ids.first {
-                        Button("Kill Process \(id)", role: .destructive) { kill(id) }
+                        Button("Kill Process \(id)…", role: .destructive) { pendingKill = id }
                     }
                 }
 
@@ -188,7 +205,7 @@ struct ActivityMonitorView: View {
             }
             .contextMenu(forSelectionType: Int.self) { ids in
                 if let id = ids.first {
-                    Button("Kill Process \(id)", role: .destructive) { kill(id) }
+                    Button("Kill Process \(id)…", role: .destructive) { pendingKill = id }
                 }
             }
 
@@ -261,6 +278,13 @@ struct ActivityMonitorView: View {
             Text("\(sessions.count) processes")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            if let actionError {
+                Text("· \(actionError)")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .lineLimit(1)
+                    .help(actionError)
+            }
             if blockedCount > 0 {
                 Text("· \(blockedCount) blocked")
                     .font(.caption)
@@ -309,6 +333,11 @@ struct ActivityMonitorView: View {
             queries = try await queriesResult
             fileIO = try await ioResult
             errorText = nil
+            // The selection is a snapshot; point it at the fresh row so the statement
+            // pane shows what the session is running now, not what it ran last time.
+            if let current = selectedSession {
+                selectedSession = sessions.first { $0.id == current.id }
+            }
         } catch {
             errorText = String(describing: error)
         }
@@ -319,9 +348,10 @@ struct ActivityMonitorView: View {
             let monitor = ActivityMonitor(session: server.session)
             do {
                 try await monitor.killSession(sessionID)
+                actionError = nil
                 await refresh()
             } catch {
-                errorText = String(describing: error)
+                actionError = "Kill \(sessionID) failed: \(String(describing: error))"
             }
         }
     }

@@ -6,7 +6,7 @@ set -euo pipefail
 CONFIG="${1:-debug}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP="$ROOT/build/SSMS for Mac.app"
-VERSION="1.6.1"
+VERSION="1.6.2"
 
 cd "$ROOT"
 echo "==> swift build -c $CONFIG"
@@ -51,7 +51,32 @@ cat > "$APP/Contents/Info.plist" <<PLIST
       <dict>
         <key>CFBundleTypeName</key><string>SQL Script</string>
         <key>CFBundleTypeRole</key><string>Editor</string>
-        <key>LSItemContentTypes</key><array><string>public.plain-text</string></array>
+        <key>LSHandlerRank</key><string>Default</string>
+        <key>LSItemContentTypes</key>
+        <array>
+          <string>dev.ssmsmac.sql</string>
+          <string>public.plain-text</string>
+        </array>
+      </dict>
+    </array>
+    <!-- macOS has no type for .sql; without this declaration the extension resolves to
+         a dynamic type that does not conform to plain text, and the Open dialog greys
+         .sql files out. -->
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+      <dict>
+        <key>UTTypeIdentifier</key><string>dev.ssmsmac.sql</string>
+        <key>UTTypeDescription</key><string>SQL Script</string>
+        <key>UTTypeConformsTo</key>
+        <array>
+          <string>public.plain-text</string>
+          <string>public.source-code</string>
+        </array>
+        <key>UTTypeTagSpecification</key>
+        <dict>
+          <key>public.filename-extension</key><array><string>sql</string></array>
+          <key>public.mime-type</key><array><string>application/sql</string></array>
+        </dict>
       </dict>
     </array>
 </dict>

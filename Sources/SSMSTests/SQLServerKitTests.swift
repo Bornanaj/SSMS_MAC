@@ -280,6 +280,279 @@ func runSQLServerKitTests(_ t: TestRunner, extra: (TestRunner) -> Void = { _ in 
         t.equal(TDSValue.int(-42).sqlLiteral, "-42", "int literal")
     }
 
+    t.suite("data editor batches") {
+        typealias Change = TableDataEditor.RowChange
+        let builder = TableDataEditor.StatementBuilder(schema: "dbo", table: "T",
+                                                       keyColumns: ["Id"],
+                                                       identityColumns: ["Id"])
+
+        // The grid sends every column of a new row, the identity column as NULL.
+        let newRow = Change(kind: .insert, rowIndex: 0, originalValues: [:],
+                            newValues: ["Id": .null, "Name": .string("a")])
+        let insert = try builder.script(for: [newRow])
+        t.expect(!insert.contains("IDENTITY_INSERT"), "a NULL identity needs no IDENTITY_INSERT", insert)
+        t.expect(insert.contains("INSERT INTO [dbo].[T] ([Name])\nVALUES (N'a');"),
+                 "the NULL identity column is left out of the insert", insert)
+
+        let explicitRow = Change(kind: .insert, rowIndex: 0, originalValues: [:],
+                                 newValues: ["Id": .int(7), "Name": .string("b")])
+        let explicit = try builder.script(for: [explicitRow])
+        t.expect(explicit.contains("SET IDENTITY_INSERT [dbo].[T] ON;")
+                 && explicit.contains("([Id], [Name])\nVALUES (7, N'b');")
+                 && explicit.contains("SET IDENTITY_INSERT [dbo].[T] OFF;"),
+                 "a typed identity value is inserted under IDENTITY_INSERT", explicit)
+
+        // A row another session changed must end the batch, not just report an error.
+        let update = Change(kind: .update, rowIndex: 0,
+                            originalValues: ["Id": .int(1), "Name": .string("a")],
+                            newValues: ["Id": .int(1), "Name": .string("b")])
+        let updated = try builder.script(for: [update])
+        t.expect(updated.hasPrefix("SET XACT_ABORT ON;\n\nBEGIN TRANSACTION;"),
+                 "XACT_ABORT is on so the THROW rolls the transaction back")
+        t.expect(updated.contains("WHERE [Id] = 1;\nIF @@ROWCOUNT <> 1 THROW 50000, "
+                                  + "N'The update affected a different number of rows"),
+                 "the row count guard throws", updated)
+        t.expect(!updated.contains("RAISERROR"), "RAISERROR no longer used: it would not end the batch")
+        t.expect(updated.hasSuffix("COMMIT TRANSACTION;\n"), "commit closes the batch")
+
+        let delete = Change(kind: .delete, rowIndex: 0,
+                            originalValues: ["Id": .int(1), "Name": .string("a")], newValues: [:])
+        let deleted = try builder.script(for: [delete])
+        t.expect(deleted.contains("DELETE FROM [dbo].[T]\nWHERE [Id] = 1;\nIF @@ROWCOUNT <> 1 THROW 50000"),
+                 "delete has the same guard", deleted)
+
+        // A comma inside a key column name is one column, not two.
+        let composite = TableDataEditor.StatementBuilder(schema: "dbo", table: "Child",
+                                                         keyColumns: ["Last, First", "ParentId"])
+        let keyed = Change(kind: .delete, rowIndex: 0,
+                           originalValues: ["Last, First": .string("Doe, John"), "ParentId": .int(2)],
+                           newValues: [:])
+        let keyedText = try composite.script(for: [keyed])
+        t.expect(keyedText.contains("WHERE [Last, First] = N'Doe, John' AND [ParentId] = 2;"),
+                 "a key column named with a comma is quoted whole", keyedText)
+    }
+
+    t.suite("object lookup quoting") {
+        t.equal(ScriptGenerator.objectIDExpression(schema: "dbo", name: "Odd]Na'me"),
+                "OBJECT_ID(N'[dbo].[Odd]]Na''me]')", "brackets and quotes are escaped")
+        t.equal(ScriptGenerator.objectIDExpression(schema: "s", name: "a.b"),
+                "OBJECT_ID(N'[s].[a.b]')", "a dot stays inside the name")
+        t.equal(ScriptGenerator.objectIDExpression(schema: "s", name: "x[y"),
+                "OBJECT_ID(N'[s].[x[y]')", "an opening bracket needs no escaping")
+        t.expect(CatalogQueries.indexes(objectID: 1).contains("AS [FillFactor]"),
+                 "FILLFACTOR is reserved, so the alias is quoted")
+    }
+
+    t.suite("index scripting") {
+        var options = ScriptOptions()
+        options.includeDescriptiveHeader = false
+        func script(_ index: ScriptIndex) -> String {
+            ScriptGenerator.createIndexStatement(index, schema: "dbo", table: "T", options: options)
+        }
+
+        let rowstore = script(ScriptIndex(
+            name: "IX_Names", type: 2,
+            keyColumns: [ScriptIndexColumn(name: "Last, First", isDescending: true)],
+            includedColumns: ["Note"], fillFactor: 80))
+        t.expect(rowstore.hasPrefix("CREATE NONCLUSTERED INDEX [IX_Names] ON [dbo].[T]\n(\n\t[Last, First] DESC\n)"),
+                 "a comma in a column name stays one column", rowstore)
+        t.expect(rowstore.contains("\nINCLUDE([Note])\nWITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF")
+                 && rowstore.contains("FILLFACTOR = 80) ON [PRIMARY]\nGO\n"),
+                 "included columns, options and filegroup", rowstore)
+
+        let clustered = script(ScriptIndex(name: "CCI", type: 5, includedColumns: ["Id", "Amount"]))
+        t.equal(clustered,
+                "CREATE CLUSTERED COLUMNSTORE INDEX [CCI] ON [dbo].[T]\nWITH (DROP_EXISTING = OFF, "
+                + "COMPRESSION_DELAY = 0, DATA_COMPRESSION = COLUMNSTORE) ON [PRIMARY]\nGO\n",
+                "a clustered columnstore index has no column list and no rowstore options")
+
+        let nonclustered = script(ScriptIndex(
+            name: "NCCI", type: 6, includedColumns: ["Amount", "Note"],
+            filterDefinition: "([Amount]>(0))", dataCompression: "COLUMNSTORE_ARCHIVE",
+            compressionDelay: 10))
+        t.equal(nonclustered,
+                "CREATE NONCLUSTERED COLUMNSTORE INDEX [NCCI] ON [dbo].[T]\n(\n\t[Amount],\n\t[Note]\n)"
+                + "\nWHERE ([Amount]>(0))\nWITH (DROP_EXISTING = OFF, COMPRESSION_DELAY = 10, "
+                + "DATA_COMPRESSION = COLUMNSTORE_ARCHIVE) ON [PRIMARY]\nGO\n",
+                "a nonclustered columnstore index lists its columns, filter and columnstore options")
+
+        let primaryXML = script(ScriptIndex(name: "PX", type: 3,
+                                            keyColumns: [ScriptIndexColumn(name: "Doc")],
+                                            xml: .init(indexType: 0)))
+        t.expect(primaryXML.hasPrefix("CREATE PRIMARY XML INDEX [PX] ON [dbo].[T]\n(\n\t[Doc]\n)\nWITH (PAD_INDEX = OFF, SORT_IN_TEMPDB"),
+                 "primary XML index names its column without a sort direction", primaryXML)
+        t.expect(!primaryXML.contains("ON [PRIMARY]") && !primaryXML.contains("STATISTICS_NORECOMPUTE"),
+                 "an XML index takes neither a filegroup nor STATISTICS_NORECOMPUTE", primaryXML)
+        let secondaryXML = script(ScriptIndex(name: "SX", type: 3,
+                                              keyColumns: [ScriptIndexColumn(name: "Doc")],
+                                              xml: .init(indexType: 1, secondaryType: "PATH",
+                                                         primaryIndex: "PX")))
+        t.expect(secondaryXML.contains("CREATE XML INDEX [SX] ON [dbo].[T]\n(\n\t[Doc]\n)\nUSING XML INDEX [PX] FOR PATH\nWITH ("),
+                 "secondary XML index names its primary index and type", secondaryXML)
+        let selective = script(ScriptIndex(name: "SEL", type: 3, xml: .init(indexType: 2)))
+        t.expect(selective.hasPrefix("-- Selective XML index [SEL]"), "selective XML index becomes a comment", selective)
+
+        let spatial = script(ScriptIndex(
+            name: "SIX", type: 4, keyColumns: [ScriptIndexColumn(name: "Shape")],
+            spatial: .init(tessellationScheme: "GEOMETRY_GRID", boundingBox: [0, 0, 100, 100],
+                           gridLevels: ["MEDIUM", "LOW", "HIGH", "MEDIUM"], cellsPerObject: 12)))
+        t.expect(spatial.hasPrefix("CREATE SPATIAL INDEX [SIX] ON [dbo].[T]\n(\n\t[Shape]\n)\nUSING GEOMETRY_GRID\n"
+                                   + "WITH (BOUNDING_BOX = (0, 0, 100, 100), GRIDS = (LEVEL_1 = MEDIUM, LEVEL_2 = LOW, "
+                                   + "LEVEL_3 = HIGH, LEVEL_4 = MEDIUM), CELLS_PER_OBJECT = 12, PAD_INDEX = OFF"),
+                 "geometry grid index carries its tessellation", spatial)
+        let autoGrid = script(ScriptIndex(
+            name: "SIX2", type: 4, keyColumns: [ScriptIndexColumn(name: "Place")],
+            spatial: .init(tessellationScheme: "GEOGRAPHY_AUTO_GRID", cellsPerObject: 8)))
+        t.expect(autoGrid.contains("USING GEOGRAPHY_AUTO_GRID\nWITH (CELLS_PER_OBJECT = 8, PAD_INDEX"),
+                 "auto grid has neither bounding box nor grids", autoGrid)
+        t.expect(script(ScriptIndex(name: "SIX3", type: 4)).hasPrefix("-- Spatial index [SIX3]"),
+                 "a spatial index without tessellation data becomes a comment")
+        t.expect(script(ScriptIndex(name: "H", type: 7)).hasPrefix("-- Index [H] on [dbo].[T]"),
+                 "an unknown index type becomes a comment rather than invalid SQL")
+
+        let key = ScriptKeyConstraint(name: "PK_Child", isPrimaryKey: true, isClustered: true,
+                                      columns: [ScriptIndexColumn(name: "Last, First"),
+                                                ScriptIndexColumn(name: "ParentId")])
+        let keyText = ScriptGenerator.keyConstraintDefinition(key)
+        t.expect(keyText.contains("PRIMARY KEY CLUSTERED \n\t(\n\t\t[Last, First] ASC,\n\t\t[ParentId] ASC\n\t)"),
+                 "key column list keeps the comma inside the name", keyText)
+    }
+
+    t.suite("module set options") {
+        var options = ScriptOptions()
+        t.equal(ScriptGenerator.setOptionsHeader(ansiNulls: true, quotedIdentifier: false, options: options),
+                "SET ANSI_NULLS ON\nGO\nSET QUOTED_IDENTIFIER OFF\nGO\n",
+                "the settings come from sys.sql_modules, not a constant")
+        options.includeSetOptionsHeader = false
+        t.equal(ScriptGenerator.setOptionsHeader(ansiNulls: true, quotedIdentifier: true, options: options),
+                "", "default settings honour the option to leave the header out")
+        t.expect(ScriptGenerator.setOptionsHeader(ansiNulls: false, quotedIdentifier: true, options: options)
+                    .contains("SET ANSI_NULLS OFF"),
+                 "an OFF setting is emitted regardless, or the module could not be re-created")
+    }
+
+    t.suite("type names") {
+        t.equal(ScriptGenerator.formatType(name: "PhoneT", schema: "fix_meta", baseName: "nvarchar",
+                                           maxLength: 40, precision: 0, scale: 0, isUserDefined: true),
+                "[fix_meta].[PhoneT]", "alias types carry their schema")
+        t.equal(ScriptGenerator.formatType(name: "geometry", schema: "sys", baseName: "geometry",
+                                           maxLength: -1, precision: 0, scale: 0, isUserDefined: false),
+                "geometry", "system CLR types stay bare")
+        t.equal(ScriptGenerator.formatType(name: "decimal", schema: "", baseName: "decimal",
+                                           maxLength: 9, precision: 12, scale: 0, isUserDefined: false),
+                "decimal(12,0)", "a sequence's decimal keeps its precision")
+    }
+
+    t.suite("create user") {
+        func user(_ auth: String, type: String = "SQL_USER", login: String = "",
+                  certificate: String = "") -> String {
+            ScriptGenerator.createUserStatement(name: "u", typeDesc: type, authenticationType: auth,
+                                                login: login, defaultSchema: "dbo",
+                                                certificate: certificate)
+        }
+        t.equal(user("INSTANCE", login: "l"),
+                "CREATE USER [u] FOR LOGIN [l] WITH DEFAULT_SCHEMA = [dbo];\nGO\n", "login-mapped user")
+        t.equal(user("NONE"),
+                "CREATE USER [u] WITHOUT LOGIN WITH DEFAULT_SCHEMA = [dbo];\nGO\n", "user without login")
+        t.equal(user("DATABASE"),
+                "CREATE USER [u] WITH PASSWORD = N'<insert a password here>', DEFAULT_SCHEMA = [dbo];\nGO\n",
+                "contained user")
+        t.equal(user("EXTERNAL", type: "EXTERNAL_USER"),
+                "CREATE USER [u] FROM EXTERNAL PROVIDER WITH DEFAULT_SCHEMA = [dbo];\nGO\n", "external user")
+        t.equal(user("NONE", type: "CERTIFICATE_MAPPED_USER", certificate: "c"),
+                "CREATE USER [u] FOR CERTIFICATE [c] WITH DEFAULT_SCHEMA = [dbo];\nGO\n",
+                "certificate-mapped user")
+    }
+
+    t.suite("partition function scripting") {
+        t.expect(ScriptGenerator.partitionFunctionBoundariesQuery(name: "pf").contains("rv.value, 126)"),
+                 "boundaries are rendered with the ISO style 126")
+        let dates = ScriptGenerator.partitionFunctionStatement(
+            name: "pf", typeName: "datetime", baseTypeName: "datetime", rangeRight: true,
+            boundaryValues: ["2024-03-04T10:00:00", "2025-01-01T00:00:00"])
+        t.equal(dates,
+                "CREATE PARTITION FUNCTION [pf] (datetime)\n    AS RANGE RIGHT\n"
+                + "    FOR VALUES (N'2024-03-04T10:00:00', N'2025-01-01T00:00:00');\nGO\n",
+                "date boundaries are quoted in the language-neutral T form")
+        let numbers = ScriptGenerator.partitionFunctionStatement(
+            name: "pf", typeName: "int", baseTypeName: "int", rangeRight: false,
+            boundaryValues: ["10", "20"])
+        t.expect(numbers.contains("AS RANGE LEFT\n    FOR VALUES (10, 20);"), "numbers stay bare", numbers)
+    }
+
+    t.suite("script batch ordering") {
+        // A reads Z; F reads A; V reads F: the only valid order interleaves the kinds.
+        let objects = [
+            ScriptableObject(schema: "dbo", name: "V", kind: .view, isSelected: true),
+            ScriptableObject(schema: "dbo", name: "F", kind: .scalarFunction, isSelected: true),
+            ScriptableObject(schema: "dbo", name: "A", kind: .view, isSelected: true),
+            ScriptableObject(schema: "dbo", name: "Z", kind: .tableValuedFunction, isSelected: true)
+        ]
+        let graph: [String: Set<String>] = ["dbo.a": ["dbo.z"], "dbo.f": ["dbo.a"], "dbo.v": ["dbo.f"]]
+        t.equal(ScriptBatchGenerator.ordered(objects, dependencies: graph).map(\.name),
+                ["Z", "A", "F", "V"], "views and functions are ordered together")
+        t.equal(ScriptBatchGenerator.ordered(objects, dependencies: [:]).map(\.name),
+                ["A", "F", "V", "Z"], "without dependencies the order is by name")
+    }
+
+    t.suite("table designer scripts") {
+        let id = DesignColumn(name: "Id", typeName: "int", isNullable: false, isPrimaryKey: true,
+                              isNew: false, originalName: "Id")
+        let code = DesignColumn(name: "Code", typeName: "int", isNullable: false,
+                                defaultDefinition: "((0))", isPrimaryKey: false,
+                                isNew: false, originalName: "Code")
+        // Built by hand, so neither the key nor the default constraint name is known and
+        // both have to be resolved on the server.
+        let original = TableDesign(schema: "dbo", name: "T", columns: [id, code])
+        var edited = original
+        edited.columns[0].isPrimaryKey = false
+        edited.columns[1].isPrimaryKey = true
+        edited.columns[1].defaultDefinition = ""
+        let script = try TableDesignService.alterScript(database: "Demo", original: original, edited: edited)
+        t.expect(script.hasPrefix("USE [Demo];"), "USE on an ordinary server")
+        t.expect(!script.contains("EXEC(N'"), "EXEC() cannot take a function call", script)
+        t.expect(script.contains("DECLARE @pk_sql nvarchar(max) = N'ALTER TABLE [dbo].[T] DROP CONSTRAINT ' + QUOTENAME(@pk_name) + N';';\n    EXEC sys.sp_executesql @pk_sql;"),
+                 "the key drop is assembled in a variable and run with sp_executesql", script)
+        t.expect(script.contains("DECLARE @df_sql1 nvarchar(max) = N'ALTER TABLE [dbo].[T] DROP CONSTRAINT ' + QUOTENAME(@df_name1) + N';';\n    EXEC sys.sp_executesql @df_sql1;"),
+                 "the default drop too", script)
+
+        var azure = original
+        azure.isAzureSQLDatabase = true
+        let azureScript = try TableDesignService.alterScript(database: "Demo", original: azure, edited: edited)
+        t.expect(azureScript.hasPrefix("SET XACT_ABORT ON;"), "no USE on Azure SQL Database", azureScript)
+    }
+
+    t.suite("flat file values") {
+        t.equal(FlatFileImporter.inferType(["02134", "10001"]).type, "nvarchar(50)",
+                "zero-padded numbers are text")
+        t.equal(FlatFileImporter.inferType(["0", "12"]).type, "int", "a plain zero is a number")
+        t.equal(FlatFileImporter.inferType(["0.5", "1.25"]).type, "decimal(3,2)", "0.5 is a decimal")
+        t.equal(try FlatFileImporter.literal("", sqlType: "int", nullable: true), "NULL",
+                "an empty cell in a nullable column is NULL")
+        t.equal(try FlatFileImporter.literal("", sqlType: "nvarchar(50)", nullable: false), "''",
+                "an empty cell in a NOT NULL text column is an empty string")
+        t.expect((try? FlatFileImporter.literal("", sqlType: "int", nullable: false)) == nil,
+                 "an empty cell in a NOT NULL number column is an error")
+        t.expect((try? FlatFileImporter.literal("", sqlType: "date", nullable: false)) == nil,
+                 "an empty cell in a NOT NULL date column is an error")
+        t.expect((try? FlatFileImporter.literal("abc", sqlType: "decimal(5,2)", nullable: true)) == nil,
+                 "a non-numeric value is reported rather than stored as NULL")
+        t.equal(try FlatFileImporter.literal("02134", sqlType: "nvarchar(50)", nullable: false),
+                "N'02134'", "text keeps its leading zero")
+
+        // 100 sampled rows of 12 bytes each ("12345,67890\n"), a 4 byte header, 10,000 bytes
+        // of file: about 833 rows, not the 100 that were sampled.
+        let sample = Array(repeating: ["12345", "67890"], count: 100)
+        t.equal(FlatFileImporter.estimateRowCount(fileBytes: 10_000, header: ["a", "b"],
+                                                  sampledRows: sample, delimiter: ",",
+                                                  sampleIsComplete: false),
+                833, "estimate scales the sample to the file size")
+        t.equal(FlatFileImporter.estimateRowCount(fileBytes: 10_000, header: [],
+                                                  sampledRows: [["a"], ["b"]], delimiter: ",",
+                                                  sampleIsComplete: true),
+                2, "a file read in full is counted exactly")
+    }
+
     t.suite("completion matching") {
         func rank(_ candidate: String, _ query: String) -> Int? {
             CompletionMatcher.match(candidate: candidate, query: query)?.rank

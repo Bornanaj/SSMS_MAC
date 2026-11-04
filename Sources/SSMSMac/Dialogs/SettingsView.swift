@@ -60,8 +60,6 @@ struct SettingsView: View {
                       value: $settings.queryHistoryLimit, format: .number)
             Toggle("Show system objects in the Object Explorer",
                    isOn: $settings.showSystemObjects)
-            Toggle("Confirm before running DROP statements",
-                   isOn: $settings.confirmDestructiveScripts)
         }
         .formStyle(.grouped)
         .padding()
@@ -74,7 +72,6 @@ struct SettingsView: View {
                 Text("Light").tag("light")
                 Text("Dark").tag("dark")
             }
-            Toggle("Restore query tabs on launch", isOn: $settings.restoreTabsOnLaunch)
         }
         .formStyle(.grouped)
         .padding()

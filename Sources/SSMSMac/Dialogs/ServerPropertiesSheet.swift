@@ -176,8 +176,26 @@ struct ServerPropertiesSheet: View {
     }
 
     private func build(_ setting: ConfigurationSetting) {
+        // The value lands in the script as typed, so it is checked here: "2,048" or
+        // "1 GB" would only fail on the server, after the preview looked fine.
+        let typed = editingValue.trimmingCharacters(in: .whitespaces)
+        guard let number = Int(typed) else {
+            isError = true
+            status = "Enter a whole number for \(setting.name), without separators."
+            return
+        }
+        if let low = Int(setting.minimum), let high = Int(setting.maximum),
+           !(low...high).contains(number) {
+            isError = true
+            status = "\(setting.name) accepts \(setting.minimum) to \(setting.maximum)."
+            return
+        }
+        isError = false
         let service = ServerConfiguration(session: server.session)
-        let script = service.changeScript(setting: setting, newValue: editingValue)
+        // The current settings tell the script whether 'show advanced options' needs
+        // unlocking, so a server that keeps it on is not switched off behind the DBA's back.
+        let script = service.changeScript(setting: setting, newValue: String(number),
+                                          settings: settings)
         pendingScript = PendingScript(title: "Change \(setting.name)", script: script,
                                       destructive: !setting.isDynamic)
     }

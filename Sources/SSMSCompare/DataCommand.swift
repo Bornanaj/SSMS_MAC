@@ -11,11 +11,13 @@ struct DataCommand {
         let quiet = args.flag("quiet")
         var options = DataCompareOptions()
         var settings = DataProjectSettings()
+        var project: CompareProject?
         if let path = args.string("project") {
-            let project = try CompareProject.read(from: URL(fileURLWithPath: path))
-            guard let data = project.data else { throw CLIError.usage("\(path) is not a data compare project.") }
+            let loaded = try readProject(path)
+            guard let data = loaded.data else { throw CLIError.usage("\(path) is not a data compare project.") }
             settings = data
             options = data.options
+            project = loaded
         }
         if let list = args.string("options") {
             let unknown = options.apply(list: list)
@@ -31,9 +33,13 @@ struct DataCommand {
             guard parts.count == 2 else { throw CLIError.usage("--map-table expects schema.source=schema.target") }
             settings.tablePairs[parts[0]] = parts[1]
         }
+        let report: (path: String, format: CompareReportFormat)? = try args.string("report").map { path in
+            (path, try reportFormat(path: path, explicit: args.string("report-type")))
+        }
 
-        let sourceEndpoint = EndpointArguments(prefix: "source", args: args)
-        let targetEndpoint = EndpointArguments(prefix: "target", args: args)
+        // A saved project names both databases; the command line overrides either side.
+        let sourceEndpoint = EndpointArguments(prefix: "source", args: args, defaults: project?.source)
+        let targetEndpoint = EndpointArguments(prefix: "target", args: args, defaults: project?.target)
         guard let sourceDatabase = sourceEndpoint.database, let targetDatabase = targetEndpoint.database else {
             throw CLIError.usage("Data compare needs --source-server/--source-database and --target-server/--target-database.")
         }
@@ -73,12 +79,22 @@ struct DataCommand {
                 FileHandle.standardError.write(Data("  [\(index + 1)/\(total)] \(name)\n".utf8))
             }
         }
-        printSummary(comparison)
+        // With the script on stdout the summary moves to stderr, so the output stays a script.
+        let scriptToStdout = args.has("script") && scriptGoesToStandardOutput(args.string("script"))
+        printSummary(comparison, quiet: quiet, toStandardError: scriptToStdout)
 
-        if let path = args.string("report") {
-            let format = CompareReportFormat(rawValue: (args.string("report-type") ?? inferFormat(path)).lowercased()) ?? .html
-            try DataCompareReport(comparison: comparison).render(format).write(to: URL(fileURLWithPath: path))
-            log("Report written to \(path).", quiet: quiet)
+        if let report {
+            try DataCompareReport(comparison: comparison).render(report.format).write(to: URL(fileURLWithPath: report.path))
+            log("Report written to \(report.path).", quiet: quiet)
+        }
+
+        // A table that could not be compared (a bad --where, a missing permission, a key the
+        // target lacks) is a failure, not "identical": nothing is scripted or deployed.
+        let failed = comparison.tables.filter { $0.error != nil }
+        if !failed.isEmpty {
+            for table in failed { log("error: \(table.mapping.displayName): \(table.error ?? "")", quiet: false) }
+            log("\(failed.count) table(s) could not be compared; nothing was scripted or deployed.", quiet: false)
+            return .generalError
         }
 
         guard args.has("script") || args.flag("deploy") else {
@@ -91,7 +107,7 @@ struct DataCommand {
         log("Synchronization: \(plan.totalInserts) inserts, \(plan.totalUpdates) updates, \(plan.totalDeletes) deletes.",
             quiet: quiet)
         if let path = args.string("script") {
-            if path == "true" || path == "-" {
+            if scriptToStdout {
                 print(plan.script)
             } else {
                 try plan.script.write(toFile: path, atomically: true, encoding: .utf8)
@@ -150,18 +166,22 @@ struct DataCommand {
         }
     }
 
-    private func printSummary(_ comparison: DataComparison) {
+    private func printSummary(_ comparison: DataComparison, quiet: Bool, toStandardError: Bool) {
+        func emit(_ line: String) {
+            if toStandardError { log(line, quiet: quiet) } else { print(line) }
+        }
         let verbose = args.flag("verbose")
         for table in comparison.tables {
             if let error = table.error {
-                print("! \(table.mapping.displayName): \(error)")
+                // Failures are reported on stderr, where they are also listed before the exit.
+                log("! \(table.mapping.displayName): \(error)", quiet: false)
                 continue
             }
             guard table.hasDifferences || verbose else { continue }
-            print("\(table.hasDifferences ? "≠" : "=") \(table.mapping.displayName): \(table.different) different, "
-                  + "\(table.onlyInSource) only in source, \(table.onlyInTarget) only in target, "
-                  + "\(table.identical) identical\(table.comparedByChecksum ? " (checksum)" : "")")
-            for note in table.notes { print("      note: \(note)") }
+            emit("\(table.hasDifferences ? "≠" : "=") \(table.mapping.displayName): \(table.different) different, "
+                 + "\(table.onlyInSource) only in source, \(table.onlyInTarget) only in target, "
+                 + "\(table.identical) identical\(table.comparedByChecksum ? " (checksum)" : "")")
+            for note in table.notes { emit("      note: \(note)") }
             if args.flag("show") {
                 let keys = table.mapping.keyColumns.map(\.sourceColumn)
                 let columns = table.mapping.comparedColumns.map(\.sourceColumn)
@@ -174,11 +194,11 @@ struct DataCommand {
                         }
                         line += " " + changes.joined(separator: "; ")
                     }
-                    print(line)
+                    emit(line)
                 }
             }
         }
         let totals = DataRowStatus.allCases.map { "\($0.title): \(comparison.total($0))" }
-        log(totals.joined(separator: ", "), quiet: args.flag("quiet"))
+        log(totals.joined(separator: ", "), quiet: quiet)
     }
 }

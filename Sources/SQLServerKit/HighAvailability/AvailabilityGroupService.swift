@@ -78,14 +78,15 @@ public struct AvailabilityGroupService: Sendable {
     /// "Invalid column name" error that takes the whole query with it, so each group of
     /// columns is gated by the version that introduced it:
     ///
-    /// - 2016 (13.x): `db_failover`, `dtc_support`, `basic_features`,
-    ///   `required_synchronized_secondaries_to_commit`, `is_distributed`, `seeding_mode_desc`
-    /// - 2017 (14.x): `cluster_type_desc`, and `secondary_lag_seconds` as a column that
-    ///   is there on every build (2016 only got it in SP2)
+    /// - 2016 (13.x): `db_failover`, `dtc_support`, `basic_features`, `is_distributed`,
+    ///   `seeding_mode_desc`
+    /// - 2017 (14.x): `cluster_type_desc`, `required_synchronized_secondaries_to_commit`,
+    ///   and `secondary_lag_seconds` as a column that is there on every build (2016 only
+    ///   got it in SP2)
     public static func capabilities(_ info: ServerInfo)
-        -> (modern: Bool, seeding: Bool, clusterType: Bool, lag: Bool) {
+        -> (modern: Bool, seeding: Bool, clusterType: Bool, lag: Bool, requiredSecondaries: Bool) {
         let major = info.majorVersion
-        return (major >= 13, major >= 13, major >= 14, major >= 14)
+        return (major >= 13, major >= 13, major >= 14, major >= 14, major >= 14 || info.isAzure)
     }
 
     // MARK: - Reads
@@ -103,13 +104,17 @@ public struct AvailabilityGroupService: Sendable {
               CONVERT(int, ag.db_failover) AS db_failover,
                      CONVERT(int, ag.dtc_support) AS dtc_support,
                      CONVERT(int, ag.basic_features) AS basic_features,
-                     ag.required_synchronized_secondaries_to_commit AS required_secondaries,
                      CONVERT(int, ag.is_distributed) AS is_distributed,
               """
             : """
               0 AS db_failover, 0 AS dtc_support, 0 AS basic_features,
-                     0 AS required_secondaries, 0 AS is_distributed,
+                     0 AS is_distributed,
               """
+        // REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT is 2017 syntax; before that a group
+        // never waits for a secondary.
+        let requiredSecondariesColumn = caps.requiredSecondaries
+            ? "ag.required_synchronized_secondaries_to_commit AS required_secondaries,"
+            : "0 AS required_secondaries,"
         // CLUSTER_TYPE arrived with the Linux-era 2017 engine; before that every group
         // is on a Windows cluster by definition.
         let clusterTypeColumn = caps.clusterType
@@ -126,6 +131,7 @@ public struct AvailabilityGroupService: Sendable {
                ISNULL(ags.synchronization_health_desc, N'') AS sync_health,
                ISNULL(ags.primary_recovery_health_desc, N'') AS recovery_health,
                \(modernColumns)
+               \(requiredSecondariesColumn)
                \(clusterTypeColumn)
                (SELECT COUNT(*) FROM sys.availability_replicas AS r
                 WHERE r.group_id = ag.group_id) AS replica_count,

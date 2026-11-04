@@ -20,8 +20,9 @@ struct MainWindowView: View {
         .sheet(isPresented: $app.showGoToLine) {
             GoToLineSheet(lineCount: max(1, app.selectedTab?.lineCount ?? 1),
                           currentLine: app.selectedTab?.currentLine ?? 1) { line in
-                NotificationCenter.default.post(name: .ssmsGoToLine, object: nil,
-                                                userInfo: ["line": line])
+                var userInfo: [String: Any] = ["line": line]
+                if let tabID = app.selectedTab?.id { userInfo["tabID"] = tabID }
+                NotificationCenter.default.post(name: .ssmsGoToLine, object: nil, userInfo: userInfo)
             }
         }
         .sheet(isPresented: Binding(get: { app.pendingTemplateScript != nil },
@@ -59,9 +60,10 @@ struct MainWindowView: View {
             VStack(spacing: 0) {
                 tabStrip
                 Divider()
+                // One window view for every tab: giving it `.id(tab.id)` would rebuild
+                // the editor on each switch and lose its undo history and caret.
                 if let tab = app.selectedTab {
                     QueryWindowView(tab: tab, settings: settings)
-                        .id(tab.id)
                 }
             }
         }
@@ -105,7 +107,7 @@ struct MainWindowView: View {
                 .lineLimit(1)
                 .font(.caption)
             Button {
-                app.closeTab(tab)
+                app.closeTabAskingToSave(tab)
             } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 8, weight: .bold))
@@ -120,10 +122,8 @@ struct MainWindowView: View {
         .contentShape(Rectangle())
         .onTapGesture { app.selectedTabID = tab.id }
         .contextMenu {
-            Button("Close") { app.closeTab(tab) }
-            Button("Close Others") {
-                for other in app.tabs where other.id != tab.id { app.closeTab(other) }
-            }
+            Button("Close") { app.closeTabAskingToSave(tab) }
+            Button("Close Others") { app.closeOtherTabs(keeping: tab) }
         }
     }
 
@@ -195,19 +195,21 @@ struct MainWindowView: View {
                 DiskUsageSheet(server: server, database: database)
             }
         case .queryOptions:
-            QueryOptionsSheet(options: app.selectedTab?.setOptions ?? QuerySetOptions()) { updated in
+            QueryOptionsSheet(options: app.selectedTab?.setOptions ?? QuerySetOptions(),
+                              outputMode: settings.resultsOutputMode == "text" ? .text : .grid) { updated, mode in
                 app.selectedTab?.setOptions = updated
+                settings.resultsOutputMode = mode.rawValue
+                app.applyResultsPreferences(QueryResultsPreferences.load())
             }
         case .templates:
             TemplateExplorerView { body in
+                // A template is a new script, as in SSMS; it never replaces the one
+                // being edited.
                 Task {
                     let server = app.servers.first { $0.id == app.selectedTab?.sessionID }
                         ?? app.servers.first
-                    if let tab = app.selectedTab {
-                        tab.text = body
-                    } else {
-                        await app.newQueryTab(server: server, database: nil, text: body)
-                    }
+                    await app.newQueryTab(server: server, database: app.selectedTab?.database,
+                                          text: body)
                     app.activeSheet = nil
                 }
             }

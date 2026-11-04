@@ -77,7 +77,7 @@ public struct ScriptableObject: Sendable, Hashable, Identifiable {
 
 /// Scripts a whole set of objects in one pass, in an order that can be executed
 /// top to bottom: schemas, tables, then the keys/indexes/triggers that hang off the
-/// tables, then views in dependency order, then functions and stored procedures.
+/// tables, then views and functions together in dependency order, then stored procedures.
 ///
 /// Per-object DDL is produced by `ScriptGenerator`; this type only decides the order
 /// and stitches the batches together.
@@ -122,14 +122,24 @@ public struct ScriptBatchGenerator: Sendable {
         }
         let procedures: [ScriptableObject] = byName(selected.filter { $0.kind == .storedProcedure })
 
-        // Views and inline functions are bound at CREATE time, so they have to follow
-        // whatever they reference. Procedures use deferred name resolution and can go last.
-        let needsGraph: Bool = !views.isEmpty || !functions.isEmpty
-        let graph: [String: Set<String>] = needsGraph
-            ? try await moduleDependencies(database: database)
-            : [:]
-        let orderedViews: [ScriptableObject] = ordered(views, dependencies: graph)
-        let orderedFunctions: [ScriptableObject] = ordered(functions, dependencies: graph)
+        // Views and functions are bound at CREATE time, so they have to follow whatever
+        // they reference, and that includes each other: a view can call a function and a
+        // function can read a view. Both kinds are therefore ordered together over one
+        // graph and emitted in that single order. Procedures use deferred name resolution
+        // and can go last.
+        let modules: [ScriptableObject] = views + functions
+        let graph: [String: Set<String>] = modules.isEmpty
+            ? [:]
+            : try await moduleDependencies(database: database)
+        let orderedModules: [ScriptableObject] = Self.ordered(modules, dependencies: graph)
+        let moduleTitle: String
+        if views.isEmpty {
+            moduleTitle = "Functions"
+        } else if functions.isEmpty {
+            moduleTitle = "Views"
+        } else {
+            moduleTitle = "Views and functions, in dependency order"
+        }
 
         let total: Int = selected.count
         var done: Int = 0
@@ -197,17 +207,12 @@ public struct ScriptBatchGenerator: Sendable {
             }
         }
 
-        // MARK: views, then functions, then procedures
+        // MARK: views and functions together, then procedures
 
-        out += await moduleSection("Views", objects: orderedViews, database: database,
+        out += await moduleSection(moduleTitle, objects: orderedModules, database: database,
                                    options: options, generator: generator,
                                    completed: done, total: total, progress: progress)
-        done += orderedViews.count
-
-        out += await moduleSection("Functions", objects: orderedFunctions, database: database,
-                                   options: options, generator: generator,
-                                   completed: done, total: total, progress: progress)
-        done += orderedFunctions.count
+        done += orderedModules.count
 
         out += await moduleSection("Stored procedures", objects: procedures, database: database,
                                    options: options, generator: generator,
@@ -248,15 +253,20 @@ public struct ScriptBatchGenerator: Sendable {
     // MARK: - Ordering
 
     private func byName(_ items: [ScriptableObject]) -> [ScriptableObject] {
+        Self.byName(items)
+    }
+
+    private static func byName(_ items: [ScriptableObject]) -> [ScriptableObject] {
         items.sorted { lhs, rhs in
             lhs.qualifiedName.localizedCaseInsensitiveCompare(rhs.qualifiedName) == .orderedAscending
         }
     }
 
-    /// Depth-first topological sort. Objects outside `items` are ignored, and a cycle
-    /// leaves the objects involved in plain name order rather than looping forever.
-    private func ordered(_ items: [ScriptableObject],
-                         dependencies: [String: Set<String>]) -> [ScriptableObject] {
+    /// Depth-first topological sort over `dependencies` (referencing `schema.name`,
+    /// lower-cased, to the names it references). Objects outside `items` are ignored, and
+    /// a cycle leaves the objects involved in plain name order rather than looping forever.
+    public static func ordered(_ items: [ScriptableObject],
+                               dependencies: [String: Set<String>]) -> [ScriptableObject] {
         let sorted: [ScriptableObject] = byName(items)
         var index: [String: ScriptableObject] = [:]
         for item in sorted { index[item.qualifiedName.lowercased()] = item }

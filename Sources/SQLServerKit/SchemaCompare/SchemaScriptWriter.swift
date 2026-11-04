@@ -193,8 +193,11 @@ public struct SchemaScriptWriter: Sendable {
             text += " TEXTIMAGE_ON \(SQLIdentifier.quote(lob))"
         }
         var with: [String] = []
-        if table.dataCompression.uppercased() != "NONE", !table.dataCompression.isEmpty {
-            with.append("DATA_COMPRESSION = \(table.dataCompression.uppercased())")
+        let compression = table.dataCompression.uppercased()
+        // Columnstore compression belongs to the clustered columnstore index, which is created
+        // after the table; CREATE TABLE only accepts NONE, ROW and PAGE.
+        if compression != "NONE", !compression.isEmpty, !compression.hasPrefix("COLUMNSTORE") {
+            with.append("DATA_COMPRESSION = \(compression)")
         }
         if table.isMemoryOptimized {
             with.append("MEMORY_OPTIMIZED = ON")
@@ -228,7 +231,10 @@ public struct SchemaScriptWriter: Sendable {
             return text + " COLUMN_SET FOR ALL_SPARSE_COLUMNS"
         }
         if column.isFileStream { text += " FILESTREAM" }
-        if let collation = column.collation, !collation.isEmpty { text += " COLLATE \(collation)" }
+        // COLLATE is not allowed on a user-defined type (Msg 452): its collation is the type's.
+        if let collation = column.collation, !collation.isEmpty, !column.isUserDefinedType {
+            text += " COLLATE \(collation)"
+        }
         if column.isSparse { text += " SPARSE" }
         if let mask = column.maskingFunction, !mask.isEmpty {
             text += " MASKED WITH (FUNCTION = '\(mask.replacingOccurrences(of: "'", with: "''"))')"
@@ -382,8 +388,9 @@ public struct SchemaScriptWriter: Sendable {
 
     public func createIndexBatches(_ index: IndexDefinition, on target: String,
                                    online: Bool = false, storageOverride: String? = nil) -> [String] {
-        var out = [createIndexStatement(index, on: target, online: online, storageOverride: storageOverride)]
-        if index.isDisabled {
+        let statement = createIndexStatement(index, on: target, online: online, storageOverride: storageOverride)
+        var out = [statement]
+        if index.isDisabled, !statement.hasPrefix("/*") {
             out.append("ALTER INDEX \(SQLIdentifier.quote(index.name)) ON \(target) DISABLE")
         }
         return out
@@ -392,6 +399,11 @@ public struct SchemaScriptWriter: Sendable {
     public func createIndexStatement(_ index: IndexDefinition, on target: String,
                                      online: Bool = false, storageOverride: String? = nil) -> String {
         let name = SQLIdentifier.quote(index.name)
+        if index.columns.isEmpty, [.spatial, .primaryXml, .secondaryXml].contains(index.kind) {
+            // Without its column the statement cannot be valid; say so instead of writing `()`.
+            let kind = index.kind == .spatial ? "spatial" : "XML"
+            return "/* The \(kind) index \(name) on \(target) was not scripted: its column is not known. */"
+        }
         var text: String
         switch index.kind {
         case .primaryXml:
@@ -673,14 +685,19 @@ public struct SchemaScriptWriter: Sendable {
     // MARK: - Table types
 
     /// Canonical CREATE TYPE … AS TABLE text, shared by the live reader and the script parser
-    /// so both produce identical bodies.
+    /// so both produce identical bodies. Collations equal to `defaultCollation` are left out:
+    /// scripts rarely spell the default out, and the catalog always reports it.
     public func tableTypeBody(quotedName: String, columns: [ColumnDefinition], indexes: [TableTypeIndex],
-                              checks: [String], memoryOptimized: Bool) -> String {
+                              checks: [String], memoryOptimized: Bool, defaultCollation: String = "") -> String {
         var lines: [String] = columns.map { column -> String in
             var copy = column
             if copy.defaultConstraint != nil {
                 copy.defaultConstraint?.name = ""
                 copy.defaultConstraint?.isSystemNamed = true
+            }
+            if let collation = copy.collation, !defaultCollation.isEmpty,
+               collation.caseInsensitiveCompare(defaultCollation) == .orderedSame {
+                copy.collation = nil
             }
             return "    " + columnDefinition(copy)
         }

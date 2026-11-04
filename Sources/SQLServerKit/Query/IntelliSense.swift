@@ -361,11 +361,35 @@ public actor IntelliSenseProvider {
         await completionResult(script: script, offset: offset, database: database).items
     }
 
+    /// True when the caret sits inside a string literal or a comment, where no
+    /// completion is worth offering.
+    public static func caretIsInsideLiteralOrComment(tokens: [TSQLToken], offset: Int) -> Bool {
+        tokens.contains { token in
+            let end = token.start + token.length
+            switch token.kind {
+            case .lineComment, .blockComment:
+                return token.start < offset && offset <= end
+            case .string:
+                // Right after the closing quote is outside; at the end of an unterminated
+                // literal the user is still inside it.
+                let terminated = token.length >= 2 && token.text.hasSuffix("'")
+                return token.start < offset && (offset < end || (offset == end && !terminated))
+            default:
+                return false
+            }
+        }
+    }
+
     public func completionResult(script: String, offset: Int,
                                  database: String) async -> CompletionResult {
         let catalog = catalogs[database.lowercased()]
         let tokens = lexer.tokenize(script)
         let context = IntelliSenseContext.analyse(tokens: tokens, offset: offset)
+        if context.isSuppressed {
+            // Reported as a member context so the editor shows nothing rather than
+            // falling back to the keyword list.
+            return CompletionResult(items: [], isMemberContext: true, hasCatalog: catalog != nil)
+        }
 
         let isMemberContext: Bool
         if case .memberOf(_) = context.kind {
@@ -783,9 +807,16 @@ struct IntelliSenseContext {
     var prefersRoutines = false
     /// True when the caret sits in a JOIN ... ON clause.
     var isJoinCondition = false
+    /// True when the caret is inside a string literal or a comment, where nothing is
+    /// worth offering and a popup would only get in the way of the text.
+    var isSuppressed = false
 
     static func analyse(tokens: [TSQLToken], offset: Int) -> IntelliSenseContext {
         var context = IntelliSenseContext()
+        if IntelliSenseProvider.caretIsInsideLiteralOrComment(tokens: tokens, offset: offset) {
+            context.isSuppressed = true
+            return context
+        }
         let significant = tokens.filter {
             $0.kind != .whitespace && $0.kind != .lineComment && $0.kind != .blockComment
         }

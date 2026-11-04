@@ -10,6 +10,8 @@ struct DataRowsGrid: NSViewRepresentable {
     let table: DataTableResult
     let status: DataRowStatus
     let onlyDifferingColumns: Bool
+    /// When the comparison was run, so a refresh lays the columns out again.
+    let comparedAt: Date
     let version: Int
     let font: NSFont
     let nullText: String
@@ -44,7 +46,8 @@ struct DataRowsGrid: NSViewRepresentable {
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         context.coordinator.update(table: table, status: status, onlyDifferingColumns: onlyDifferingColumns,
-                                   version: version, font: font, nullText: nullText, onToggle: onToggle)
+                                   comparedAt: comparedAt, version: version, font: font, nullText: nullText,
+                                   onToggle: onToggle)
     }
 
     // MARK: - Coordinator
@@ -74,13 +77,14 @@ struct DataRowsGrid: NSViewRepresentable {
         private var onToggle: (Int, Bool) -> Void = { _, _ in }
         private var tableID = ""
 
-        func update(table: DataTableResult, status: DataRowStatus, onlyDifferingColumns: Bool, version: Int,
-                    font: NSFont, nullText: String, onToggle: @escaping (Int, Bool) -> Void) {
+        func update(table: DataTableResult, status: DataRowStatus, onlyDifferingColumns: Bool, comparedAt: Date,
+                    version: Int, font: NSFont, nullText: String, onToggle: @escaping (Int, Bool) -> Void) {
             self.font = font
             self.nullText = nullText
             self.onToggle = onToggle
             let filtered: [DataRowDifference] = table.rows.filter { $0.status == status }
-            let signature = "\(table.id)|\(status.rawValue)|\(onlyDifferingColumns)|\(table.mapping.columns.count)"
+            let signature = Self.layoutSignature(table: table, status: status, onlyDifferingColumns: onlyDifferingColumns,
+                                                 comparedAt: comparedAt, rows: filtered)
             let changedTable = tableID != table.id || layoutSignature != signature
             rows = filtered
             tableID = table.id
@@ -95,6 +99,24 @@ struct DataRowsGrid: NSViewRepresentable {
             } else {
                 tableView?.reloadData()
             }
+        }
+
+        /// Everything the column layout depends on. Counting the columns was not enough: a
+        /// column excluded in the project, a changed key or a refresh that changes which
+        /// columns differ keeps the count and puts values under the wrong headers.
+        static func layoutSignature(table: DataTableResult, status: DataRowStatus, onlyDifferingColumns: Bool,
+                                    comparedAt: Date, rows: [DataRowDifference]) -> String {
+            var parts: [String] = [table.id, status.rawValue, String(onlyDifferingColumns),
+                                   String(comparedAt.timeIntervalSinceReferenceDate)]
+            parts.append(table.mapping.keyColumns.map(\.sourceColumn).joined(separator: ","))
+            parts.append(table.mapping.comparedColumns.map { $0.sourceColumn + ">" + $0.targetColumn }
+                .joined(separator: ","))
+            if status == .different && onlyDifferingColumns {
+                var differing: Set<Int> = []
+                for row in rows { differing.formUnion(row.differingColumns) }
+                parts.append(differing.sorted().map(String.init).joined(separator: ","))
+            }
+            return parts.joined(separator: "|")
         }
 
         private func rebuildColumns(table: DataTableResult, status: DataRowStatus, onlyDifferingColumns: Bool) {

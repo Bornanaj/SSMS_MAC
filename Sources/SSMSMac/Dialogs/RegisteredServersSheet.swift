@@ -14,11 +14,24 @@ struct RegisteredServersSheet: View {
     @State private var showNewGroup = false
     @State private var showMultiServer = false
     @State private var status: String?
+    /// Groups that exist without a server in them yet. A profile only records the
+    /// group it is in, so a group created ahead of its first server is remembered on
+    /// its own until a server is moved into it, as SSMS keeps an empty server group.
+    @State private var emptyGroups: [String] = RegisteredServersSheet.storedEmptyGroups()
+    /// Set when "New Group…" was chosen from the Move to group menu, so the selected
+    /// server goes straight into the group once it is named.
+    @State private var moveSelectionIntoNewGroup = false
+
+    private static let emptyGroupsKey = "registeredServers.emptyGroups"
+
+    private static func storedEmptyGroups() -> [String] {
+        UserDefaults.standard.stringArray(forKey: emptyGroupsKey) ?? []
+    }
 
     private var groups: [String] {
         let named = app.connections.profiles.compactMap { $0.group }
             .filter { !$0.isEmpty }
-        return Array(Set(named)).sorted()
+        return Array(Set(named + emptyGroups)).sorted()
     }
 
     private var ungrouped: [ConnectionProfile] {
@@ -50,13 +63,14 @@ struct RegisteredServersSheet: View {
         .frame(width: 860, height: 560)
         .alert("New group", isPresented: $showNewGroup) {
             TextField("Group name", text: $newGroupName)
-            Button("Cancel", role: .cancel) { newGroupName = "" }
-            Button("Create") {
-                // A group exists once a server is filed under it, so creating one just
-                // selects the name and waits for a server to be assigned.
-                selectedGroup = newGroupName
-                status = "Assign a server to \"\(newGroupName)\" to keep the group."
+            Button("Cancel", role: .cancel) {
                 newGroupName = ""
+                moveSelectionIntoNewGroup = false
+            }
+            Button("Create") {
+                let name = newGroupName.trimmingCharacters(in: .whitespaces)
+                newGroupName = ""
+                createGroup(name)
             }
         }
         .sheet(isPresented: $showMultiServer) {
@@ -75,6 +89,11 @@ struct RegisteredServersSheet: View {
                     ForEach(groups, id: \.self) { group in
                         Label(group, systemImage: "folder")
                             .tag(String?.some(group))
+                            .contextMenu {
+                                if profiles(in: group).isEmpty {
+                                    Button("Remove Group") { removeEmptyGroup(group) }
+                                }
+                            }
                     }
                     if !ungrouped.isEmpty {
                         Label("Ungrouped", systemImage: "tray")
@@ -95,72 +114,87 @@ struct RegisteredServersSheet: View {
 
     private var serverList: some View {
         VStack(spacing: 0) {
-            Table(visibleProfiles, selection: $selectedProfile) {
-                TableColumn("Name") { profile in
-                    HStack(spacing: 6) {
-                        if let color = Theme.color(hex: profile.colorHex) {
-                            Circle().fill(color).frame(width: 7, height: 7)
-                        } else {
-                            Image(systemName: "server.rack").foregroundStyle(.secondary)
-                        }
-                        Text(profile.displayName).lineLimit(1)
-                    }
-                }.width(min: 140, ideal: 190)
-                TableColumn("Server") { Text($0.server) }.width(150)
-                TableColumn("Authentication") { Text($0.authentication.displayName) }.width(160)
-                TableColumn("Group") { profile in
-                    Text(profile.group ?? "").foregroundStyle(.secondary)
-                }.width(120)
+            if visibleProfiles.isEmpty, let selectedGroup, selectedGroup != "__ungrouped__" {
+                ContentUnavailableView("No servers in \(selectedGroup)", systemImage: "folder",
+                                       description: Text("Choose All servers, select a server "
+                                                         + "and use Move to group to file it here."))
+            } else {
+                serverTable
             }
 
             Divider()
-            HStack(spacing: 8) {
-                Button {
-                    guard let id = selectedProfile,
-                          let profile = app.connections.profiles.first(where: { $0.id == id })
-                    else { return }
-                    Task {
-                        let password = await app.connections.password(for: profile)
-                        await app.connect(profile: profile, password: password)
-                        dismiss()
-                    }
-                } label: { Label("Connect", systemImage: "bolt") }
-                    .disabled(selectedProfile == nil)
+            serverActions
+        }
+    }
 
-                Menu {
-                    Button("Ungrouped") { assign(group: "") }
-                    ForEach(groups, id: \.self) { group in
-                        Button(group) { assign(group: group) }
+    private var serverTable: some View {
+        Table(visibleProfiles, selection: $selectedProfile) {
+            TableColumn("Name") { profile in
+                HStack(spacing: 6) {
+                    if let color = Theme.color(hex: profile.colorHex) {
+                        Circle().fill(color).frame(width: 7, height: 7)
+                    } else {
+                        Image(systemName: "server.rack").foregroundStyle(.secondary)
                     }
-                    if let selectedGroup, selectedGroup != "__ungrouped__",
-                       !groups.contains(selectedGroup) {
-                        Button(selectedGroup) { assign(group: selectedGroup) }
-                    }
-                } label: {
-                    Label("Move to group", systemImage: "folder")
+                    Text(profile.displayName).lineLimit(1)
                 }
+            }.width(min: 140, ideal: 190)
+            TableColumn("Server") { Text($0.server) }.width(150)
+            TableColumn("Authentication") { Text($0.authentication.displayName) }.width(160)
+            TableColumn("Group") { profile in
+                Text(profile.group ?? "").foregroundStyle(.secondary)
+            }.width(120)
+        }
+    }
+
+    private var serverActions: some View {
+        HStack(spacing: 8) {
+            Button {
+                guard let id = selectedProfile,
+                      let profile = app.connections.profiles.first(where: { $0.id == id })
+                else { return }
+                Task {
+                    let password = await app.connections.password(for: profile)
+                    await app.connect(profile: profile, password: password)
+                    dismiss()
+                }
+            } label: { Label("Connect", systemImage: "bolt") }
                 .disabled(selectedProfile == nil)
 
-                Button(role: .destructive) {
-                    guard let id = selectedProfile,
-                          let profile = app.connections.profiles.first(where: { $0.id == id })
-                    else { return }
-                    app.connections.remove(profile)
-                    selectedProfile = nil
-                    status = "Removed \(profile.displayName)."
-                } label: { Label("Remove", systemImage: "trash") }
-                    .disabled(selectedProfile == nil)
-
-                Spacer()
-
-                Button {
-                    showMultiServer = true
-                } label: { Label("New Multi-Server Query", systemImage: "square.stack.3d.up") }
-                    .disabled(visibleProfiles.count < 2)
-                    .help("Run one script against every server in this group")
+            Menu {
+                Button("Ungrouped") { assign(group: "") }
+                ForEach(groups, id: \.self) { group in
+                    Button(group) { assign(group: group) }
+                }
+                Divider()
+                Button("New Group…") {
+                    moveSelectionIntoNewGroup = true
+                    showNewGroup = true
+                }
+            } label: {
+                Label("Move to group", systemImage: "folder")
             }
-            .padding(8)
+            .disabled(selectedProfile == nil)
+
+            Button(role: .destructive) {
+                guard let id = selectedProfile,
+                      let profile = app.connections.profiles.first(where: { $0.id == id })
+                else { return }
+                app.connections.remove(profile)
+                selectedProfile = nil
+                status = "Removed \(profile.displayName)."
+            } label: { Label("Remove", systemImage: "trash") }
+                .disabled(selectedProfile == nil)
+
+            Spacer()
+
+            Button {
+                showMultiServer = true
+            } label: { Label("New Multi-Server Query", systemImage: "square.stack.3d.up") }
+                .disabled(visibleProfiles.count < 2)
+                .help("Run one script against every server in this group")
         }
+        .padding(8)
     }
 
     private func assign(group: String) {
@@ -168,9 +202,44 @@ struct RegisteredServersSheet: View {
               var profile = app.connections.profiles.first(where: { $0.id == id }) else { return }
         profile.group = group.isEmpty ? nil : group
         app.connections.save(profile, password: nil)
+        // The profile now carries the group, so it no longer needs remembering as empty.
+        if emptyGroups.contains(group) {
+            emptyGroups.removeAll { $0 == group }
+            persistEmptyGroups()
+        }
         status = group.isEmpty
             ? "\(profile.displayName) is now ungrouped."
             : "\(profile.displayName) moved to \(group)."
+    }
+
+    private func createGroup(_ name: String) {
+        defer { moveSelectionIntoNewGroup = false }
+        guard !name.isEmpty, name != "__ungrouped__" else { return }
+        if moveSelectionIntoNewGroup, selectedProfile != nil {
+            assign(group: name)
+            return
+        }
+        guard !groups.contains(name) else {
+            status = "There is already a group called \"\(name)\"."
+            return
+        }
+        emptyGroups.append(name)
+        persistEmptyGroups()
+        // Every server stays in view, so one can be picked and moved into the group.
+        selectedGroup = nil
+        status = "Group \"\(name)\" created. Select a server and use Move to group to file it there."
+    }
+
+    private func removeEmptyGroup(_ group: String) {
+        guard profiles(in: group).isEmpty else { return }
+        emptyGroups.removeAll { $0 == group }
+        persistEmptyGroups()
+        if selectedGroup == group { selectedGroup = nil }
+        status = "Removed the empty group \"\(group)\"."
+    }
+
+    private func persistEmptyGroups() {
+        UserDefaults.standard.set(emptyGroups, forKey: Self.emptyGroupsKey)
     }
 
     private var footer: some View {

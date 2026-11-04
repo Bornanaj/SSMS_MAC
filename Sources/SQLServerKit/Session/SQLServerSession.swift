@@ -25,6 +25,8 @@ public actor SQLServerSession: Identifiable {
     /// Azure SQL Database forbids USE, so metadata needs one connection per database.
     private var perDatabaseConnections: [String: TDSConnection] = [:]
     private var closed = false
+    /// Keeps a `USE` and the query that follows it together on the metadata connection.
+    private let metadataLock = AsyncLock()
 
     private init(id: UUID,
                  profile: ConnectionProfile,
@@ -71,8 +73,14 @@ public actor SQLServerSession: Identifiable {
     }
 
     /// Run a catalog query in the context of `database`.
+    ///
+    /// `USE` and the query are two requests, and an actor's `await` lets another caller
+    /// in between them: without the lock, two overlapping catalog reads for different
+    /// databases could send the first query to the second one's database.
     @discardableResult
     public func metadataQuery(_ sql: String, database: String? = nil) async throws -> TDSQueryResult {
+        await metadataLock.acquire()
+        defer { metadataLock.release() }
         let connection = try await metadataConnection(for: database)
         if let database, !database.isEmpty, !serverInfo.isAzureSQLDatabase,
            connection.database.caseInsensitiveCompare(database) != .orderedSame {

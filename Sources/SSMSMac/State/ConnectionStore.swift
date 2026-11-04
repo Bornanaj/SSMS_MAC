@@ -61,7 +61,9 @@ final class ConnectionStore: ObservableObject {
             if (updated.discoveredServerName ?? "").isEmpty {
                 updated.discoveredServerName = profiles[twin].discoveredServerName
             }
-            updated.id = profiles[twin].id
+            // The incoming id wins: a live session is keyed by the id of the profile
+            // it was opened with, and rewriting that here would leave the app unable
+            // to tell that the server is already connected.
             profiles[twin] = updated
         } else {
             profiles.append(updated)

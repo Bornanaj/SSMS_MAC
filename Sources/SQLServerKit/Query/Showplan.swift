@@ -65,7 +65,8 @@ public enum ShowplanParser {
         guard let root = document.rootElement() else { return [] }
 
         var statements: [PlanStatement] = []
-        for element in descendants(of: root, named: ["StmtSimple", "StmtCond", "StmtCursor", "StmtUseDb"]) {
+        for element in descendants(of: root, named: ["StmtSimple", "StmtCond", "StmtCursor", "StmtUseDb"],
+                                   crossingRelOps: true) {
             var statement = PlanStatement()
             statement.statementText = element.attribute(forName: "StatementText")?.stringValue?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -76,7 +77,7 @@ public enum ShowplanParser {
                 if let relOp = firstChild(of: queryPlan, named: "RelOp") {
                     statement.root = parseRelOp(relOp)
                 }
-                if let missing = descendants(of: queryPlan, named: ["MissingIndexGroup"]).first {
+                if let missing = descendants(of: queryPlan, named: ["MissingIndexGroup"], crossingRelOps: true).first {
                     statement.missingIndexImpact = double(missing, "Impact")
                     statement.missingIndexDefinition = missingIndexScript(missing)
                 }
@@ -179,14 +180,20 @@ public enum ShowplanParser {
         (element.children ?? []).compactMap { $0 as? XMLElement }.first { $0.name == name }
     }
 
-    private static func descendants(of element: XMLElement, named names: [String]) -> [XMLElement] {
+    /// Elements below `element` with one of `names`. By default the search stops at a
+    /// nested `RelOp`: an operator's object, predicates, warnings and runtime counters
+    /// are its own, and crossing into its children handed a Nested Loops the rows,
+    /// index and warnings of the seeks underneath it. Statement-level searches that
+    /// genuinely span the whole plan pass `crossingRelOps: true`.
+    private static func descendants(of element: XMLElement, named names: [String],
+                                    crossingRelOps: Bool = false) -> [XMLElement] {
         var result: [XMLElement] = []
         func walk(_ node: XMLElement) {
             for child in node.children ?? [] {
                 guard let childElement = child as? XMLElement else { continue }
                 if let name = childElement.name, names.contains(name) {
                     result.append(childElement)
-                } else {
+                } else if crossingRelOps || childElement.name != "RelOp" {
                     walk(childElement)
                 }
             }

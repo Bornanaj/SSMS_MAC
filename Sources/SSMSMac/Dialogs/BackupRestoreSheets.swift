@@ -73,8 +73,16 @@ struct BackupSheet: View {
             path = "/var/opt/mssql/data/\(database)_\(Int(Date().timeIntervalSince1970)).bak"
             Task { await refreshScript() }
         }
+        // Every option feeds the request, so every option refreshes the preview; the
+        // script shown must be the script that runs.
         .onChange(of: kind) { _, _ in Task { await refreshScript() } }
         .onChange(of: path) { _, _ in Task { await refreshScript() } }
+        .onChange(of: name) { _, _ in Task { await refreshScript() } }
+        .onChange(of: compression) { _, _ in Task { await refreshScript() } }
+        .onChange(of: checksum) { _, _ in Task { await refreshScript() } }
+        .onChange(of: copyOnly) { _, _ in Task { await refreshScript() } }
+        .onChange(of: initialize) { _, _ in Task { await refreshScript() } }
+        .onChange(of: verify) { _, _ in Task { await refreshScript() } }
     }
 
     private var header: some View {
@@ -362,23 +370,31 @@ struct IndexMaintenanceView: View {
         Task {
             let admin = DatabaseAdmin(session: server.session)
             var done = 0
+            var firstError: String?
             for target in targets {
                 do {
                     if rebuild {
-                        try await admin.rebuildIndexes(database: database, schema: target.schema,
-                                                       table: target.table, online: false)
+                        // One index at a time. `ALTER INDEX ALL` would rebuild every index
+                        // on the table, offline, once per selected row.
+                        try await admin.rebuildIndex(database: database, schema: target.schema,
+                                                     table: target.table, index: target.indexName,
+                                                     online: false)
                     } else {
                         try await admin.reorganizeIndex(database: database, schema: target.schema,
                                                         table: target.table, index: target.indexName)
                     }
                     done += 1
                 } catch {
-                    statusText = String(describing: error)
+                    if firstError == nil { firstError = String(describing: error) }
                 }
             }
-            statusText = "\(done) of \(targets.count) index operations completed."
             isLoading = false
+            // Reload first: load() writes its own status line, which would otherwise
+            // replace the outcome before anyone could read it.
             await load()
+            var summary = "\(done) of \(targets.count) index operations completed."
+            if let firstError { summary += " First error: \(firstError)" }
+            statusText = summary
         }
     }
 }

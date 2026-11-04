@@ -84,6 +84,9 @@ struct Runner {
                 let formatter = SQLFormatter(style: SQLFormatter.Style())
                 print(formatter.format(argument.isEmpty ? sampleScript : argument))
 
+            case "concurrency":
+                try await runConcurrency(session: session)
+
             default:
                 try await runTree(session: session)
                 try await runScript(session: session, target: "dbo.Customers")
@@ -91,6 +94,7 @@ struct Runner {
                 try await runExport(session: session)
                 try await runIntelliSense(session: session, prefixOffsetScript: "")
                 try await runAdmin(session: session)
+                try await runConcurrency(session: session)
             }
 
             await session.close()
@@ -189,6 +193,38 @@ struct Runner {
     }
 
     // MARK: - Admin
+
+    /// Overlapping catalog reads for different databases must each answer from the
+    /// database they asked for. `metadataQuery` sends `USE` and the query as two
+    /// requests; without the session's lock, two callers interleave and one of them
+    /// reads the other's database.
+    static func runConcurrency(session: SQLServerSession) async throws {
+        print("\n=== Concurrent catalog reads ===")
+        let targets = ["master", "tempdb", "msdb", database]
+        let wrong: [String] = try await withThrowingTaskGroup(of: (String, String).self) { group in
+            for round in 0..<12 {
+                let target = targets[round % targets.count]
+                group.addTask {
+                    let result = try await session.metadataQuery("SELECT DB_NAME() AS db;",
+                                                                 database: target)
+                    let answered = result.resultSets.first?.dictionaries().first?.string("db") ?? ""
+                    return (target, answered)
+                }
+            }
+            var mismatches: [String] = []
+            for try await (asked, answered) in group
+            where asked.caseInsensitiveCompare(answered) != .orderedSame {
+                mismatches.append("asked \(asked), got \(answered)")
+            }
+            return mismatches
+        }
+        if wrong.isEmpty {
+            print("12 overlapping reads each answered from their own database")
+        } else {
+            throw SQLServerError.invalidProfile("catalog reads crossed databases: "
+                                                + wrong.joined(separator: "; "))
+        }
+    }
 
     static func runActivity(session: SQLServerSession) async throws {
         print("\n=== Activity Monitor ===")

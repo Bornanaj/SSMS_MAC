@@ -66,6 +66,9 @@ public struct TableDesign: Sendable {
     /// Approximate row count taken from sys.partitions at load time. nil when the
     /// design was built by hand rather than read from a server.
     var rowCount: Int64?
+    /// Whether the design was read from Azure SQL Database, where `USE` is not allowed.
+    /// False for a design built by hand.
+    public var isAzureSQLDatabase: Bool
 
     public init(schema: String, name: String, columns: [DesignColumn]) {
         self.schema = schema
@@ -73,6 +76,7 @@ public struct TableDesign: Sendable {
         self.columns = columns
         self.primaryKeyName = nil
         self.rowCount = nil
+        self.isAzureSQLDatabase = false
     }
 
     public var qualifiedName: String {
@@ -121,6 +125,7 @@ public struct TableDesignService: Sendable {
             let baseName: String = row.string("TypeName")
             let isUserDefined: Bool = row.bool("IsUserDefinedType")
             let rendered: String = Self.renderTypeName(base: baseName,
+                                                       schema: row.string("TypeSchema"),
                                                        maxLength: row.int("MaxLength"),
                                                        precision: row.int("TypePrecision"),
                                                        scale: row.int("TypeScale"),
@@ -152,6 +157,7 @@ public struct TableDesignService: Sendable {
         if result.resultSets.count > 2, let statsRow = result.resultSets[2].dictionaries().first {
             design.rowCount = statsRow.int64("TableRows")
         }
+        design.isAzureSQLDatabase = await session.serverInfo.isAzureSQLDatabase
         return design
     }
 
@@ -171,6 +177,7 @@ public struct TableDesignService: Sendable {
             CONVERT(int, c.precision)                              AS TypePrecision,
             CONVERT(int, c.scale)                                  AS TypeScale,
             ISNULL(t.name, N'')                                    AS TypeName,
+            ISNULL(ts.name, N'')                                   AS TypeSchema,
             CONVERT(int, ISNULL(t.is_user_defined, 0))             AS IsUserDefinedType,
             ISNULL(dc.definition, N'')                             AS DefaultDefinition,
             ISNULL(dc.name, N'')                                   AS DefaultConstraintName,
@@ -181,6 +188,7 @@ public struct TableDesignService: Sendable {
             ISNULL(CONVERT(nvarchar(4000), ep.value), N'')         AS ColumnDescription
         FROM sys.columns AS c
         JOIN sys.types AS t ON t.user_type_id = c.user_type_id
+        LEFT JOIN sys.schemas AS ts ON ts.schema_id = t.schema_id
         LEFT JOIN sys.default_constraints AS dc ON dc.object_id = c.default_object_id
         LEFT JOIN sys.identity_columns AS ic
                ON ic.object_id = c.object_id AND ic.column_id = c.column_id
@@ -213,11 +221,21 @@ public struct TableDesignService: Sendable {
 
     public func alterScript(database: String, original: TableDesign,
                             edited: TableDesign) throws -> String {
+        try Self.alterScript(database: database, original: original, edited: edited)
+    }
+
+    /// The batch `alterScript` shows. Planning needs no connection, so the text can be
+    /// checked without a server.
+    public static func alterScript(database: String, original: TableDesign,
+                                   edited: TableDesign) throws -> String {
         let statements: [String] = try plan(original: original, edited: edited)
         guard !statements.isEmpty else { return "" }
 
         var lines: [String] = []
-        lines.append("USE \(SQLIdentifier.quote(database));")
+        // Azure SQL Database rejects USE; the connection is already in the database.
+        if !original.isAzureSQLDatabase {
+            lines.append("USE \(SQLIdentifier.quote(database));")
+        }
         lines.append("SET XACT_ABORT ON;")
         lines.append("BEGIN TRANSACTION;")
         lines.append(contentsOf: statements)
@@ -230,7 +248,7 @@ public struct TableDesignService: Sendable {
     @discardableResult
     public func apply(database: String, original: TableDesign,
                       edited: TableDesign) async throws -> Int {
-        let statements: [String] = try plan(original: original, edited: edited)
+        let statements: [String] = try Self.plan(original: original, edited: edited)
         guard !statements.isEmpty else { return 0 }
 
         var lines: [String] = []
@@ -264,7 +282,7 @@ public struct TableDesignService: Sendable {
 
     // MARK: - Planning
 
-    private func plan(original: TableDesign, edited: TableDesign) throws -> [String] {
+    private static func plan(original: TableDesign, edited: TableDesign) throws -> [String] {
         guard original.schema.caseInsensitiveCompare(edited.schema) == .orderedSame,
               original.name.caseInsensitiveCompare(edited.name) == .orderedSame else {
             throw SQLServerError.unsupportedOperation(
@@ -388,8 +406,8 @@ public struct TableDesignService: Sendable {
         return head + body + tail
     }
 
-    private func validate(original: TableDesign, edited: TableDesign,
-                          originalByID: [UUID: DesignColumn]) throws {
+    private static func validate(original: TableDesign, edited: TableDesign,
+                                 originalByID: [UUID: DesignColumn]) throws {
         guard !edited.columns.isEmpty else {
             throw SQLServerError.unsupportedOperation("A table must keep at least one column.")
         }
@@ -430,8 +448,8 @@ public struct TableDesignService: Sendable {
         }
     }
 
-    private func validateExisting(_ existing: DesignColumn, edited: DesignColumn,
-                                  name: String) throws {
+    private static func validateExisting(_ existing: DesignColumn, edited: DesignColumn,
+                                         name: String) throws {
         if existing.isIdentity != edited.isIdentity {
             throw SQLServerError.unsupportedOperation(
                 "The identity property of column \(name) cannot be turned "
@@ -465,8 +483,8 @@ public struct TableDesignService: Sendable {
         }
     }
 
-    private func validateNew(_ column: DesignColumn, name: String,
-                             original: TableDesign, edited: TableDesign) throws {
+    private static func validateNew(_ column: DesignColumn, name: String,
+                                    original: TableDesign, edited: TableDesign) throws {
         let hasRows: Bool = original.approximateRowCount > 0
         let hasDefault: Bool = !column.defaultDefinition.trimmed().isEmpty
         if hasRows && !column.isNullable && !hasDefault && !column.isIdentity {
@@ -490,11 +508,13 @@ public struct TableDesignService: Sendable {
 
     // MARK: - Statement builders
 
-    private func dropPrimaryKeyStatement(table: String, design: TableDesign) -> String {
+    private static func dropPrimaryKeyStatement(table: String, design: TableDesign) -> String {
         if let name = design.primaryKeyName, !name.isEmpty {
             return "ALTER TABLE \(table) DROP CONSTRAINT \(SQLIdentifier.quote(name));"
         }
-        // The design did not come from `load`, so resolve the name on the server.
+        // The design did not come from `load`, so resolve the name on the server. EXEC()
+        // takes only literals and variables, so the statement is assembled in a variable
+        // first: EXEC(N'…' + QUOTENAME(@pk_name)) is a syntax error.
         return """
         DECLARE @pk_name sysname;
         SELECT @pk_name = kc.name
@@ -502,17 +522,21 @@ public struct TableDesignService: Sendable {
         WHERE kc.parent_object_id = OBJECT_ID(\(SQLIdentifier.literal(table)))
           AND kc.type = 'PK';
         IF @pk_name IS NOT NULL
-            EXEC(N'ALTER TABLE \(Self.escapedForDynamicSQL(table)) DROP CONSTRAINT ' \
-        + QUOTENAME(@pk_name));
+        BEGIN
+            DECLARE @pk_sql nvarchar(max) = N'ALTER TABLE \(Self.escapedForDynamicSQL(table)) \
+        DROP CONSTRAINT ' + QUOTENAME(@pk_name) + N';';
+            EXEC sys.sp_executesql @pk_sql;
+        END;
         """
     }
 
-    private func dropDefaultStatement(table: String, columnName: String,
-                                      constraintName: String?, index: Int) -> String {
+    private static func dropDefaultStatement(table: String, columnName: String,
+                                             constraintName: String?, index: Int) -> String {
         if let constraintName, !constraintName.isEmpty {
             return "ALTER TABLE \(table) DROP CONSTRAINT \(SQLIdentifier.quote(constraintName));"
         }
         let variable: String = "@df_name\(index)"
+        let statement: String = "@df_sql\(index)"
         return """
         DECLARE \(variable) sysname;
         SELECT \(variable) = dc.name
@@ -522,15 +546,18 @@ public struct TableDesignService: Sendable {
         WHERE dc.parent_object_id = OBJECT_ID(\(SQLIdentifier.literal(table)))
           AND c.name = \(SQLIdentifier.literal(columnName));
         IF \(variable) IS NOT NULL
-            EXEC(N'ALTER TABLE \(Self.escapedForDynamicSQL(table)) DROP CONSTRAINT ' \
-        + QUOTENAME(\(variable)));
+        BEGIN
+            DECLARE \(statement) nvarchar(max) = N'ALTER TABLE \(Self.escapedForDynamicSQL(table)) \
+        DROP CONSTRAINT ' + QUOTENAME(\(variable)) + N';';
+            EXEC sys.sp_executesql \(statement);
+        END;
         """
     }
 
     /// MS_Description is added or updated depending on what is already there, and
     /// dropped when the user clears the text.
-    private func descriptionStatement(schema: String, table: String,
-                                      column: String, text: String) -> String {
+    private static func descriptionStatement(schema: String, table: String,
+                                             column: String, text: String) -> String {
         let qualified: String = SQLIdentifier.quote(schema: schema, name: table)
         let objectLiteral: String = SQLIdentifier.literal(qualified)
         let columnLiteral: String = SQLIdentifier.literal(column)
@@ -612,9 +639,16 @@ public struct TableDesignService: Sendable {
         return existing.collation.trimmed().lowercased() != edited.collation.trimmed().lowercased()
     }
 
-    static func renderTypeName(base: String, maxLength: Int, precision: Int, scale: Int,
-                               isUserDefined: Bool) -> String {
-        guard !isUserDefined else { return base }
+    /// A user-defined (alias or CLR) type is written `[schema].[type]`: a bare name only
+    /// resolves in the caller's default schema, so ALTER COLUMN would fail with
+    /// "Cannot find data type" for a type in any other schema.
+    static func renderTypeName(base: String, schema: String = "", maxLength: Int,
+                               precision: Int, scale: Int, isUserDefined: Bool) -> String {
+        guard !isUserDefined else {
+            return schema.isEmpty
+                ? SQLIdentifier.quote(base)
+                : SQLIdentifier.quote(schema: schema, name: base)
+        }
         switch base.lowercased() {
         case "char", "varchar", "binary", "varbinary":
             return maxLength < 0 ? "\(base)(max)" : "\(base)(\(maxLength))"

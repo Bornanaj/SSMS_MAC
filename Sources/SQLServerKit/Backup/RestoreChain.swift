@@ -73,6 +73,9 @@ public enum RestoreChainBuilder {
     /// The chain that ends with `target`: the backup the user picked in the list.
     public static func chain(ending target: BackupSetInfo,
                              in sets: [BackupSetInfo]) -> Result<RestoreChain, RestoreChainError> {
+        if target.isNullDevice {
+            return .failure(.unsupported("This backup was written to the NUL device; there is no file to restore from."))
+        }
         if target.isFull { return .success(RestoreChain(full: target, differential: nil, logs: [])) }
         if target.isDifferential {
             guard let full = base(of: target, in: sets) else { return .failure(.noBaseForDifferential) }
@@ -94,7 +97,7 @@ public enum RestoreChainBuilder {
     /// The chain that restores to `time`, or to the latest point the backups reach when nil.
     public static func chain(pointInTime time: Date?,
                              in sets: [BackupSetInfo]) -> Result<RestoreChain, RestoreChainError> {
-        let fulls: [BackupSetInfo] = sets.filter { $0.isFull && $0.deviceType != 7 }
+        let fulls: [BackupSetInfo] = sets.filter { $0.isFull && $0.deviceType != 7 && !$0.isNullDevice }
             .sorted { ($0.finished ?? .distantPast) > ($1.finished ?? .distantPast) }
         guard !fulls.isEmpty else { return .failure(.noFullBackup) }
         let usable: [BackupSetInfo] = time.map { cutoff in
@@ -134,15 +137,15 @@ public enum RestoreChainBuilder {
 
     /// The full backup a differential is based on.
     static func base(of differential: BackupSetInfo, in sets: [BackupSetInfo]) -> BackupSetInfo? {
-        sets.first { $0.isFull && !$0.isCopyOnly && $0.checkpointLSN == differential.databaseBackupLSN }
-            ?? sets.first { $0.isFull && $0.checkpointLSN == differential.databaseBackupLSN }
+        let fulls = sets.filter { $0.isFull && !$0.isNullDevice && $0.checkpointLSN == differential.databaseBackupLSN }
+        return fulls.first { !$0.isCopyOnly } ?? fulls.first
     }
 
     static func newestDifferential(for full: BackupSetInfo, notAfter time: Date?,
                                    in sets: [BackupSetInfo]) -> BackupSetInfo? {
         guard !full.isCopyOnly else { return nil }
         return sets.filter { set in
-            set.isDifferential && set.databaseBackupLSN == full.checkpointLSN
+            set.isDifferential && !set.isNullDevice && set.databaseBackupLSN == full.checkpointLSN
                 && (time.map { (set.finished ?? .distantFuture) <= $0 } ?? true)
         }.max { ($0.finished ?? .distantPast) < ($1.finished ?? .distantPast) }
     }
@@ -155,12 +158,14 @@ public enum RestoreChainBuilder {
 
     /// Bases a log chain could start from, newest first, each differential before its full.
     static func baseCandidates(before lsn: LSN, notAfter time: Date?, in sets: [BackupSetInfo]) -> [BaseCandidate] {
-        let fulls: [BackupSetInfo] = sets.filter { $0.isFull && $0.deviceType != 7 && $0.lastLSN <= lsn }
-            .sorted { $0.lastLSN > $1.lastLSN }
+        let fulls: [BackupSetInfo] = sets.filter {
+            $0.isFull && $0.deviceType != 7 && !$0.isNullDevice && $0.lastLSN <= lsn
+        }.sorted { $0.lastLSN > $1.lastLSN }
         var candidates: [BaseCandidate] = []
         for full in fulls {
             let differentials: [BackupSetInfo] = full.isCopyOnly ? [] : sets.filter {
-                $0.isDifferential && $0.databaseBackupLSN == full.checkpointLSN && $0.lastLSN <= lsn
+                $0.isDifferential && !$0.isNullDevice && $0.databaseBackupLSN == full.checkpointLSN
+                    && $0.lastLSN <= lsn
             }.sorted { $0.lastLSN > $1.lastLSN }
             for differential in differentials {
                 candidates.append(BaseCandidate(full: full, differential: differential))
@@ -176,8 +181,10 @@ public enum RestoreChainBuilder {
             .min { $0.lastLSN < $1.lastLSN }
     }
 
+    /// Logs that can take part in a chain: not copy-only, not from another tool's virtual
+    /// device, and not written to NUL.
     static func regularLogs(_ sets: [BackupSetInfo]) -> [BackupSetInfo] {
-        sets.filter { $0.isLog && !$0.isCopyOnly && $0.deviceType != 7 }
+        sets.filter { $0.isLog && !$0.isCopyOnly && $0.deviceType != 7 && !$0.isNullDevice }
     }
 
     /// Contiguous logs from `base` up to and including `target`.

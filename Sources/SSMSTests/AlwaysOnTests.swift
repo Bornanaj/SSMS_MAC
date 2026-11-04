@@ -162,6 +162,18 @@ func runAlwaysOnTests(_ t: TestRunner) {
                  "listener port change")
         t.equal(try? AvailabilityGroupScripts.removeListener(group: "AG", listenerName: "ag"),
                 "ALTER AVAILABILITY GROUP [AG] REMOVE LISTENER N'ag';", "remove listener")
+
+        // The grammar is ADD IP ((ip, mask)): one pair of parentheses around the list and
+        // one around the pair, inside the MODIFY LISTENER parentheses.
+        let added = (try? AvailabilityGroupScripts.addListenerIP(
+            group: "AG", listenerName: "ag-listener",
+            address: AvailabilityListenerIP(address: "10.2.0.25", subnetMask: "255.255.255.0"))) ?? ""
+        t.expect(added.contains("MODIFY LISTENER N'ag-listener'")
+                 && added.contains("(ADD IP ((N'10.2.0.25', N'255.255.255.0')))"),
+                 "ADD IP wraps the address pair twice", added)
+        t.expect((try? AvailabilityGroupScripts.addListenerIP(
+            group: "AG", listenerName: "ag", address: AvailabilityListenerIP(address: "10.2.0.25"))) == nil,
+                 "an added address needs a subnet mask")
     }
 
     t.suite("always on group options") {
@@ -376,6 +388,16 @@ func runAlwaysOnTests(_ t: TestRunner) {
         t.expect(groups2016.contains("ag.is_distributed"), "and distributed groups")
         t.expect(!groups2016.contains("ag.cluster_type_desc"),
                  "but CLUSTER_TYPE is 2017 syntax", groups2016)
+        t.expect(!groups2016.contains("ag.required_synchronized_secondaries_to_commit"),
+                 "and so is REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT", groups2016)
+        t.expect(AvailabilityGroupService.groupsQuery(sql2017)
+                    .contains("ag.required_synchronized_secondaries_to_commit AS required_secondaries"),
+                 "2017 reports the required secondaries")
+        var azure = info("12.0.2000.8")
+        azure.engineEdition = 8
+        t.expect(AvailabilityGroupService.groupsQuery(azure)
+                    .contains("ag.required_synchronized_secondaries_to_commit"),
+                 "Azure has the column whatever version it reports")
         t.expect(AvailabilityGroupService.groupsQuery(sql2017).contains("ag.cluster_type_desc"),
                  "2017 reports the cluster type")
 

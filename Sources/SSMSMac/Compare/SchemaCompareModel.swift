@@ -38,6 +38,8 @@ final class SchemaCompareModel: ObservableObject {
     @Published var showSetup = true
     @Published var showDeployment = false
 
+    /// Differences a just-opened project saved as unticked, applied by the next comparison.
+    private var pendingDeselected: Set<String> = []
     private var forwarding: [AnyCancellable] = []
 
     init() {
@@ -94,6 +96,13 @@ final class SchemaCompareModel: ObservableObject {
         mappings.objectMappings = mappings.objectMappings.map {
             ObjectMapping(id: $0.id, source: $0.target, target: $0.source)
         }
+        // Column mappings are looked up by (source, target), so they turn round too; without
+        // this a mapped column reads as dropped on one side and added on the other.
+        mappings.columnMappings = mappings.columnMappings.map { set in
+            ColumnMappingSet(id: set.id, source: set.target, target: set.source,
+                             pairs: set.pairs.map { ColumnMappingPair(source: $0.target, target: $0.source) })
+        }
+        pendingDeselected = []
         comparison = nil
         differences = []
     }
@@ -115,7 +124,8 @@ final class SchemaCompareModel: ObservableObject {
             let result = await Task.detached(priority: .userInitiated) {
                 comparer.compare(source: sourceSnapshot, target: targetSnapshot)
             }.value
-            let previouslyDeselected = Set(differences.filter { !$0.isSelected }.map(\.id))
+            let previouslyDeselected = Set(differences.filter { !$0.isSelected }.map(\.id)).union(pendingDeselected)
+            pendingDeselected = []
             comparison = result
             differences = result.differences.map { difference in
                 var copy = difference
@@ -239,18 +249,50 @@ final class SchemaCompareModel: ObservableObject {
     func excludeFromComparison(_ difference: SchemaDifference) {
         let key = difference.sourceKey ?? difference.targetKey
         guard let key else { return }
-        filter.rules.append(SchemaFilterRule(action: .exclude, types: [key.type], field: .qualifiedName,
-                                             op: .equals, value: key.qualifiedName))
+        let rule = SchemaFilterRule(action: .exclude, types: [key.type], field: .qualifiedName,
+                                    op: .equals, value: key.qualifiedName)
+        filter.rules.append(rule)
+        // The results already reflect the rule, so this does not make them stale.
+        comparison?.filter.rules.append(rule)
         differences.removeAll { $0.id == difference.id }
     }
 
     // MARK: - Deployment
 
-    /// The comparison as it currently stands, including ticks.
+    /// The comparison as it currently stands: the ticks as they are now, and the options as
+    /// they are now, so the deployment wizard's toggles reach the planner.
     var currentComparison: SchemaComparison? {
         guard var result = comparison else { return nil }
         result.differences = differences
+        result.options = options
         return result
+    }
+
+    /// The options the comparer and normalizer read; the rest only shape the deployment
+    /// script and may change freely after a comparison.
+    static func comparisonOptions(_ options: SchemaCompareOptions) -> SchemaCompareOptions {
+        var copy = options
+        let defaults = SchemaCompareOptions()
+        copy.includeDependencies = defaults.includeDependencies
+        copy.addObjectExistenceChecks = defaults.addObjectExistenceChecks
+        copy.dropAndCreateInsteadOfAlter = defaults.dropAndCreateInsteadOfAlter
+        copy.doNotUseTransactions = defaults.doNotUseTransactions
+        copy.doNotAddErrorHandling = defaults.doNotAddErrorHandling
+        copy.addDatabaseUseStatement = defaults.addDatabaseUseStatement
+        copy.addOnlineOption = defaults.addOnlineOption
+        copy.addSmartDefaults = defaults.addSmartDefaults
+        copy.includePrintStatements = defaults.includePrintStatements
+        copy.refreshDependentViews = defaults.refreshDependentViews
+        copy.dropDependentForeignKeys = defaults.dropDependentForeignKeys
+        return copy
+    }
+
+    /// The project was edited since the results were produced, so they no longer describe
+    /// what a deployment would do; a new comparison is needed first.
+    var resultsAreStale: Bool {
+        guard let comparison else { return false }
+        return Self.comparisonOptions(comparison.options) != Self.comparisonOptions(options)
+            || comparison.filter != filter || comparison.mappings != mappings
     }
 
     func plan() -> DeploymentPlan? {
@@ -309,6 +351,8 @@ final class SchemaCompareModel: ObservableObject {
             options = settings.options
             filter = settings.filter
             mappings = settings.mappings
+            // The saved ticks belong to differences that do not exist until the next compare.
+            pendingDeselected = settings.deselected
             comparison = nil
             differences = []
             projectURL = url

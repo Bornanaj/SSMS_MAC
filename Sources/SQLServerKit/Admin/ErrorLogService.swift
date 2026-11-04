@@ -147,10 +147,15 @@ public struct ErrorLogService: Sendable {
     /// SSMS has a Recycle button on the log viewer; the log rolls without a restart.
     public func recycle(kind: ServerLogKind = .sqlServer) async throws {
         try await requireLog()
-        let procedure = kind == .sqlAgent ? "sp_cycle_agent_errorlog" : "sp_cycle_errorlog"
         let connection = try await session.openConnection(database: "master")
         defer { Task { try? await connection.close() } }
-        let result = try await connection.query("EXEC master.dbo.\(procedure);")
+        let result = try await connection.query(ErrorLogService.recycleStatement(kind: kind))
         if let failure = result.errors.first { throw failure }
+    }
+
+    /// The statement behind Recycle: sp_cycle_errorlog lives in master, but the Agent's
+    /// sp_cycle_agent_errorlog lives in msdb.
+    public static func recycleStatement(kind: ServerLogKind) -> String {
+        kind == .sqlAgent ? "EXEC msdb.dbo.sp_cycle_agent_errorlog;" : "EXEC master.dbo.sp_cycle_errorlog;"
     }
 }
