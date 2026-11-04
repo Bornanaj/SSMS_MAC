@@ -50,8 +50,8 @@ final class CompareSessionPool {
         // A connection that is not open yet is opened here rather than refused: the
         // saved password is used when there is one, and the window asks for it when
         // there is not.
-        let password = typedPasswords[profile.credentialKey]
-            ?? await app.connections.password(for: profile)
+        var password = typedPasswords[profile.credentialKey]
+        if password == nil { password = await app.connections.password(for: profile) }
         if profile.authentication.needsPassword && (password ?? "").isEmpty {
             throw CompareConnectionError.passwordRequired(profile)
         }
