@@ -84,16 +84,22 @@ public struct IntelliSenseCatalog: Sendable {
     public var tables: [IntelliSenseObject]
     public var routines: [IntelliSenseObject]
     public var relationships: [IntelliSenseRelationship]
+    /// False while only the object names have been read. Completion works from that
+    /// outline immediately; columns and parameters arrive with the full read, and are
+    /// fetched per object on demand until they do.
+    public var isComplete: Bool
 
     public init(database: String, fetchedAt: Date, schemas: [String],
                 tables: [IntelliSenseObject], routines: [IntelliSenseObject],
-                relationships: [IntelliSenseRelationship] = []) {
+                relationships: [IntelliSenseRelationship] = [],
+                isComplete: Bool = true) {
         self.database = database
         self.fetchedAt = fetchedAt
         self.schemas = schemas
         self.tables = tables
         self.routines = routines
         self.relationships = relationships
+        self.isComplete = isComplete
     }
 
     /// Foreign keys linking the two tables, in either direction.
@@ -219,8 +225,11 @@ public actor IntelliSenseProvider {
         catalogs[database.lowercased()]
     }
 
+    /// `onOutline` is called with the object count as soon as the names are in, which
+    /// is what the editor can start completing against.
     @discardableResult
-    public func refresh(database: String) async throws -> IntelliSenseCatalog {
+    public func refresh(database: String,
+                        onOutline: (@Sendable (Int) -> Void)? = nil) async throws -> IntelliSenseCatalog {
         // The catalog is a big read, and the session's metadata connection is shared
         // with the Object Explorer and every properties sheet. On a production
         // database that read takes long enough to stall all of them, so it gets a
@@ -228,15 +237,115 @@ public actor IntelliSenseProvider {
         let connection = try await session.openConnection(database: database)
         defer { Task { try? await connection.close() } }
 
+        // Names first. Reading every column of every object takes seconds on a real
+        // database, and until it lands the editor would offer nothing but keywords —
+        // which is what "IntelliSense does not work" looks like from the outside. The
+        // names arrive in one cheap query and are published straight away, so tables
+        // and procedures can be completed while the columns are still being read.
+        let outline = try await loadObjectNames(on: connection)
+        catalogs[database.lowercased()] = IntelliSenseCatalog(
+            database: database,
+            fetchedAt: Date(),
+            schemas: Set(outline.map(\.schema)).sorted(),
+            tables: outline.filter { $0.kind == "table" || $0.kind == "view" },
+            routines: outline.filter { $0.kind == "procedure" || $0.kind == "function" },
+            relationships: [],
+            isComplete: false)
+        onOutline?(outline.count)
+
         let tables = try await loadTables(on: connection)
         let routines = try await loadRoutines(on: connection)
         let relationships = try await loadRelationships(on: connection)
         let schemas = Set(tables.map(\.schema)).union(routines.map(\.schema)).sorted()
         let catalog = IntelliSenseCatalog(database: database, fetchedAt: Date(),
                                           schemas: schemas, tables: tables, routines: routines,
-                                          relationships: relationships)
+                                          relationships: relationships,
+                                          isComplete: true)
         catalogs[database.lowercased()] = catalog
         return catalog
+    }
+
+    /// Schema, name and kind for everything completable, in one pass. No columns, no
+    /// parameters: this is the query that has to come back quickly.
+    private func loadObjectNames(on connection: TDSConnection) async throws -> [IntelliSenseObject] {
+        let sql = """
+        SELECT s.name AS schema_name, o.name AS object_name,
+               CASE o.type WHEN 'V' THEN N'view'
+                           WHEN 'P' THEN N'procedure'
+                           WHEN 'U' THEN N'table'
+                           ELSE N'function' END AS object_kind
+        FROM sys.objects AS o
+        JOIN sys.schemas AS s ON s.schema_id = o.schema_id
+        WHERE o.type IN ('U', 'V', 'P', 'FN', 'IF', 'TF', 'AF') AND o.is_ms_shipped = 0
+        ORDER BY s.name, o.name
+        """
+        let result = try await connection.query(sql)
+        if let failure = result.errors.first { throw failure }
+        return (result.resultSets.first?.dictionaries() ?? []).map { row in
+            IntelliSenseObject(schema: row.string("schema_name"),
+                               name: row.string("object_name"),
+                               kind: row.string("object_kind"))
+        }
+    }
+
+    /// Columns for one table, fetched when something needs them before the full read
+    /// has landed — typing "alias." should not have to wait for the whole database.
+    private func fetchColumns(schema: String, name table: String,
+                              database: String) async -> [IntelliSenseColumn] {
+        let sql = """
+        SELECT c.name AS column_name, c.column_id, c.is_nullable,
+               t.name AS type_name, c.max_length, c.precision, c.scale, t.is_user_defined,
+               CONVERT(int, CASE WHEN pk.column_id IS NULL THEN 0 ELSE 1 END) AS is_primary_key
+        FROM sys.columns AS c
+        JOIN sys.objects AS o ON o.object_id = c.object_id
+        JOIN sys.schemas AS s ON s.schema_id = o.schema_id
+        JOIN sys.types AS t ON t.user_type_id = c.user_type_id
+        LEFT JOIN (
+            SELECT ic.object_id, ic.column_id
+            FROM sys.indexes AS i
+            JOIN sys.index_columns AS ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
+            WHERE i.is_primary_key = 1
+        ) AS pk ON pk.object_id = c.object_id AND pk.column_id = c.column_id
+        WHERE s.name = \(SQLIdentifier.literal(schema)) AND o.name = \(SQLIdentifier.literal(table))
+        ORDER BY c.column_id
+        """
+        guard let result = try? await session.metadataQuery(sql, database: database),
+              result.errors.isEmpty else { return [] }
+        return (result.resultSets.first?.dictionaries() ?? []).map { row in
+            IntelliSenseColumn(
+                name: row.string("column_name"),
+                typeName: ScriptGenerator.formatType(name: row.string("type_name"),
+                                                     baseName: row.string("type_name"),
+                                                     maxLength: row.int("max_length"),
+                                                     precision: row.int("precision"),
+                                                     scale: row.int("scale"),
+                                                     isUserDefined: row.bool("is_user_defined")),
+                isNullable: row.bool("is_nullable"),
+                isPrimaryKey: row.int("is_primary_key") == 1,
+                ordinal: row.int("column_id"))
+        }
+    }
+
+    /// Returns the object with its columns, reading them on demand when the catalog is
+    /// still only names, and keeping what it read.
+    private func objectWithColumns(_ object: IntelliSenseObject,
+                                   database: String) async -> IntelliSenseObject {
+        guard object.columns.isEmpty else { return object }
+        let columns = await fetchColumns(schema: object.schema, name: object.name,
+                                         database: database)
+        guard !columns.isEmpty else { return object }
+        var filled = object
+        filled.columns = columns
+        let key = database.lowercased()
+        if var catalog = catalogs[key],
+           let index = catalog.tables.firstIndex(where: {
+               $0.name.caseInsensitiveCompare(object.name) == .orderedSame
+                   && $0.schema.caseInsensitiveCompare(object.schema) == .orderedSame
+           }) {
+            catalog.tables[index] = filled
+            catalogs[key] = catalog
+        }
+        return filled
     }
 
     // MARK: Completion
@@ -303,8 +412,8 @@ public actor IntelliSenseProvider {
                                                kind: $0.kind == "procedure" ? .procedure : .function,
                                                detail: $0.qualifiedName, priority: 60) })
             }
-            return result(memberCompletions(qualifier: qualifier, context: context,
-                                            catalog: catalog))
+            return result(await memberCompletions(qualifier: qualifier, context: context,
+                                                  catalog: catalog, database: database))
 
         case .tableReference:
             let aliases = generatesAliases
@@ -447,7 +556,8 @@ public actor IntelliSenseProvider {
 
     private func memberCompletions(qualifier: String,
                                    context: IntelliSenseContext,
-                                   catalog: IntelliSenseCatalog?) -> [CompletionItem] {
+                                   catalog: IntelliSenseCatalog?,
+                                   database: String) async -> [CompletionItem] {
         guard let catalog else { return [] }
         let bare = IntelliSenseCatalog.unquote(qualifier)
 
@@ -455,7 +565,10 @@ public actor IntelliSenseProvider {
         if let source = context.sources.first(where: {
             $0.alias?.caseInsensitiveCompare(bare) == .orderedSame
                 || $0.table.caseInsensitiveCompare(bare) == .orderedSame
-        }), let object = catalog.object(named: source.table, schema: source.schema) {
+        }), let found = catalog.object(named: source.table, schema: source.schema) {
+            // Typing "c." must answer now, so a table whose columns have not been read
+            // yet is read on the spot rather than coming back empty.
+            let object = await objectWithColumns(found, database: database)
             return object.columns.map { column in
                 CompletionItem.make(label: column.name, kind: .column,
                                     detail: "\(column.typeName)"
@@ -465,7 +578,8 @@ public actor IntelliSenseProvider {
             }
         }
 
-        if let object = catalog.object(named: bare, schema: nil) {
+        if let found = catalog.object(named: bare, schema: nil) {
+            let object = await objectWithColumns(found, database: database)
             return object.columns.map { column in
                 CompletionItem.make(label: column.name, kind: .column,
                                     detail: column.typeName, priority: column.ordinal)

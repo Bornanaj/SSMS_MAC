@@ -20,7 +20,8 @@ enum EditorDump {
     }
 
     @MainActor
-    static func capture(textView: SQLTextView, tabText: String, label: String) {
+    static func capture(textView: SQLTextView, tab: QueryTab, label: String) {
+        let tabText = tab.text
         var out = "=== editor dump \(label) ===\n"
 
         func line(_ key: String, _ value: Any) {
@@ -28,6 +29,23 @@ enum EditorDump {
         }
 
         let storage = textView.textStorage
+
+        // IntelliSense state, because "it does not work" has half a dozen causes that
+        // look the same on screen: no catalog, an empty candidate list, a popup that
+        // opened off-screen, or a prefix the matcher threw everything away on.
+        line("intelliSense status", tab.intelliSenseStatus.isEmpty ? "—" : tab.intelliSenseStatus)
+        line("intelliSense error", tab.intelliSenseError ?? "none")
+        line("catalog loading", tab.isLoadingCatalog)
+        line("candidates cached", tab.completionItems.count)
+        line("member context", tab.completionIsMemberContext)
+        line("database", tab.database.isEmpty ? "—" : tab.database)
+        line("spid", tab.spid)
+        line("completion prefix",
+             (textView.string as NSString).substring(with: textView.rangeForUserCompletion))
+        line("completion range", NSStringFromRange(textView.rangeForUserCompletion))
+        line("popup visible", textView.completionPanel.isVisible)
+        line("popup entries", textView.completionPanel.entries.count)
+
         line("tab.text length", tabText.utf16.count)
         line("tab.text preview", String(tabText.prefix(60)).replacingOccurrences(of: "\n", with: "\\n"))
         line("textView.string length", (textView.string as NSString).length)

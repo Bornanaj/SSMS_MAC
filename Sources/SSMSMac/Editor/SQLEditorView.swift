@@ -169,7 +169,7 @@ struct SQLEditorView: NSViewRepresentable {
             MainActor.assumeIsolated {
                 guard let coordinator, let textView = coordinator.textView,
                       textView.window?.isKeyWindow == true else { return }
-                EditorDump.capture(textView: textView, tabText: coordinator.tab.text,
+                EditorDump.capture(textView: textView, tab: coordinator.tab,
                                    label: coordinator.tab.displayTitle)
             }
         }
@@ -302,6 +302,13 @@ struct SQLEditorView: NSViewRepresentable {
             highlighter.highlight(storage, in: range)
             tab.text = textView.string
             container?.refreshGutter()
+            // Completion candidates follow the text, not just the caret: an edit that
+            // leaves the caret where it was (a paste, a delete, an undo) still changes
+            // what should be offered.
+            if settings.intelliSenseEnabled {
+                tab.requestCompletions(script: textView.string,
+                                       at: textView.selectedRange().location)
+            }
         }
 
         func textViewDidChangeSelection(_ notification: Notification) {

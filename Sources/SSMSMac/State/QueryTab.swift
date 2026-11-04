@@ -234,7 +234,13 @@ final class QueryTab: ObservableObject, Identifiable {
         intelliSenseStatus = "IntelliSense: reading \(target)…"
         catalogTask = Task { [weak self] in
             do {
-                let catalog = try await intelliSense.refresh(database: target)
+                let catalog = try await intelliSense.refresh(database: target) { count in
+                    Task { @MainActor [weak self] in
+                        guard self?.isLoadingCatalog == true else { return }
+                        self?.intelliSenseStatus = "IntelliSense: \(count) objects, "
+                            + "reading columns…"
+                    }
+                }
                 guard !Task.isCancelled else { return }
                 self?.intelliSenseStatus = "IntelliSense: \(catalog.tables.count) tables, "
                     + "\(catalog.routines.count) routines"

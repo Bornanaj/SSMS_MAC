@@ -165,12 +165,13 @@ final class SQLTextView: NSTextView {
             return
         }
 
-        // A single character matches almost everything, so the popup would flash on
-        // every keystroke without earning its place.
-        if !isDot && rangeForUserCompletion.length < 2 { return }
+        // One character is enough to start filtering — waiting for two is what makes
+        // the list feel like it is not there. The delay below keeps it from flashing
+        // while someone types quickly.
+        if !isDot && rangeForUserCompletion.length < 1 { return }
 
         completionTimer?.invalidate()
-        completionTimer = Timer.scheduledTimer(withTimeInterval: isDot ? 0.05 : 0.20,
+        completionTimer = Timer.scheduledTimer(withTimeInterval: isDot ? 0.05 : 0.25,
                                                repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, self.window?.firstResponder === self else { return }

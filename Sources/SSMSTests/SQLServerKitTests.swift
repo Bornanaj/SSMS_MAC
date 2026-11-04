@@ -329,6 +329,32 @@ func runSQLServerKitTests(_ t: TestRunner, extra: (TestRunner) -> Void = { _ in 
                 "brackets are stripped")
     }
 
+    t.suite("catalog completeness") {
+        // The outline is published before the columns are read, so completion can
+        // offer table names while the big read is still running.
+        let outline = IntelliSenseCatalog(
+            database: "Demo", fetchedAt: Date(), schemas: ["dbo"],
+            tables: [IntelliSenseObject(schema: "dbo", name: "Customers", kind: "table")],
+            routines: [], relationships: [], isComplete: false)
+        t.expect(!outline.isComplete, "a names-only catalog says so")
+        t.equal(outline.columns(forTable: "Customers", schema: nil).count, 0,
+                "and carries no columns yet")
+        t.expect(outline.object(named: "Customers", schema: nil) != nil,
+                 "but the table can already be completed")
+
+        let full = IntelliSenseCatalog(
+            database: "Demo", fetchedAt: Date(), schemas: ["dbo"],
+            tables: [IntelliSenseObject(schema: "dbo", name: "Customers", kind: "table",
+                                        columns: [IntelliSenseColumn(name: "Id",
+                                                                     typeName: "int",
+                                                                     isNullable: false,
+                                                                     isPrimaryKey: true,
+                                                                     ordinal: 1)])],
+            routines: [])
+        t.expect(full.isComplete, "a catalog defaults to complete")
+        t.equal(full.columns(forTable: "Customers", schema: nil).count, 1, "with its columns")
+    }
+
     t.suite("wildcard expansion") {
         let columns = [
             IntelliSenseColumn(name: "CustomerId", typeName: "int", isNullable: false,
