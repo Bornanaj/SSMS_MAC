@@ -86,6 +86,8 @@ final class QueryTab: ObservableObject, Identifiable {
     /// True when the last request was for "alias." or "schema.": the editor shows
     /// nothing rather than a keyword list there.
     @Published private(set) var completionIsMemberContext = false
+    /// Why the list is empty, when it is. Shown as the single row of the popup.
+    @Published private(set) var completionMessage: String?
     @Published private(set) var isLoadingCatalog = false
     /// What the completion catalog is doing, shown in the status bar: a load in
     /// progress, what it found, or why it did not.
@@ -305,6 +307,7 @@ final class QueryTab: ObservableObject, Identifiable {
                 guard let self else { return }
                 self.completionItems = result.items
                 self.completionIsMemberContext = result.isMemberContext
+                self.completionMessage = result.message
                 self.onCompletionsUpdated?()
 
                 // "alias." before that table's columns have been read: fetch just

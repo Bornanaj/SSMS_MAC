@@ -28,6 +28,7 @@ extension CompletionItem.Kind {
         case .dataType: return "textformat.abc"
         case .alias: return "tag"
         case .parameter: return "slider.horizontal.3"
+        case .info: return "info.circle"
         }
     }
 
@@ -43,6 +44,7 @@ extension CompletionItem.Kind {
         case .snippet: return .green
         case .dataType: return .mint
         case .alias: return .pink
+        case .info: return .secondary
         }
     }
 
@@ -61,6 +63,7 @@ extension CompletionItem.Kind {
         case .dataType: return "type"
         case .alias: return "alias"
         case .parameter: return "parameter"
+        case .info: return ""
         }
     }
 }

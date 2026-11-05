@@ -89,9 +89,15 @@ public struct CompletionEngine: Sendable {
             // the whole editor wait. The caller is told what to read instead.
             let members = memberCompletions(qualifier: qualifier, context: context,
                                             catalog: catalog)
-            var members_answer = answer(members.items)
-            members_answer.pendingColumns = members.pendingColumns
-            return members_answer
+            var memberAnswer = answer(members.items)
+            memberAnswer.pendingColumns = members.pendingColumns
+            if members.items.isEmpty {
+                // Nothing to offer after a dot is the one case where silence is
+                // indistinguishable from a broken editor, so it says why.
+                memberAnswer.message = emptyMemberReason(qualifier: qualifier,
+                                                         pending: members.pendingColumns)
+            }
+            return memberAnswer
 
         case .tableReference:
             let aliases = generatesAliases
@@ -119,6 +125,21 @@ public struct CompletionEngine: Sendable {
                 + tableCompletions(catalog: catalog)
                 + routineCompletions(catalog: catalog, kindFilter: nil))
         }
+    }
+
+    /// The sentence shown in place of a member list that came back empty.
+    private func emptyMemberReason(qualifier: String, pending: ObjectReference?) -> String {
+        guard let catalog else {
+            return "IntelliSense has not read this database yet"
+        }
+        if let pending {
+            return "Reading the columns of \(pending.schema).\(pending.name)…"
+        }
+        if !catalog.isComplete {
+            return "IntelliSense is still reading \(catalog.database)…"
+        }
+        let bare = IntelliSenseCatalog.unquote(qualifier)
+        return "No table, view or alias called \(bare) is in scope"
     }
 
     // MARK: - Builders

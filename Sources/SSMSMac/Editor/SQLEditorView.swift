@@ -514,6 +514,11 @@ struct SQLEditorView: NSViewRepresentable {
             return tab.completionIsMemberContext ? [] : Coordinator.keywordFallback
         }
 
+        func sqlTextViewCompletionMessage(_ textView: SQLTextView) -> String? {
+            guard settings.intelliSenseEnabled else { return nil }
+            return tab.completionMessage
+        }
+
         func sqlTextViewDidRequestExpandWildcards(_ textView: SQLTextView) {
             Task { @MainActor in
                 guard let expansion = await tab.expandWildcards(at: textView.selectedRange().location)

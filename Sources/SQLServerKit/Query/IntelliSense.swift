@@ -159,6 +159,8 @@ public struct CompletionItem: Sendable, Hashable, Identifiable {
     public enum Kind: String, Sendable, Hashable {
         case keyword, table, view, column, procedure, function, schema, database
         case variable, snippet, dataType, alias, parameter
+        /// Not a completion: a line explaining why there is nothing to complete.
+        case info
     }
 
     public var id: String
@@ -202,13 +204,18 @@ public struct CompletionResult: Sendable {
     /// Set when the answer needs columns the catalog has not read yet. The caller reads
     /// them and asks again; nothing is fetched while the list is being computed.
     public var pendingColumns: ObjectReference?
+    /// Why there is nothing to offer, when there is nothing to offer. An empty popup
+    /// and a popup that never opened look identical, and both read as "IntelliSense is
+    /// broken"; this is what the editor shows instead.
+    public var message: String?
 
     public init(items: [CompletionItem], isMemberContext: Bool, hasCatalog: Bool,
-                pendingColumns: ObjectReference? = nil) {
+                pendingColumns: ObjectReference? = nil, message: String? = nil) {
         self.items = items
         self.isMemberContext = isMemberContext
         self.hasCatalog = hasCatalog
         self.pendingColumns = pendingColumns
+        self.message = message
     }
 }
 

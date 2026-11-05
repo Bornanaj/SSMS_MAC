@@ -105,6 +105,18 @@ func runCompletionTests(_ t: TestRunner) {
         t.expect(unknown.items.isEmpty, "an unknown qualifier has no members")
         t.expect(unknown.isMemberContext,
                  "and says so, so the editor does not offer keywords instead")
+
+        // An empty list after a dot is the one case that reads as a broken editor, so
+        // every one of them carries the reason the popup shows instead.
+        t.expect(unknown.message?.contains("zz") == true,
+                 "an unknown qualifier names itself", unknown.message ?? "none")
+        t.expect(unread.message?.contains("DeliveryVendor") == true,
+                 "a table still being read says so", unread.message ?? "none")
+        let noCatalog = at("SELECT * FROM dbo.Customers AS c WHERE c.|",
+                           engine: CompletionEngine(catalog: nil))
+        t.expect(noCatalog.message?.isEmpty == false,
+                 "and so does a window whose catalog never arrived", noCatalog.message ?? "none")
+        t.expect(alias.message == nil, "a list that has rows carries no message")
     }
 
     t.suite("completion in context") {

@@ -8,6 +8,8 @@ protocol SQLTextViewDelegate: AnyObject {
     func sqlTextViewDidRequestCancel(_ textView: SQLTextView)
     /// Candidates for the caret's context, unfiltered. The text view ranks them.
     func sqlTextViewCompletionCandidates(_ textView: SQLTextView) -> [CompletionItem]
+    /// Why there are none, when there are none.
+    func sqlTextViewCompletionMessage(_ textView: SQLTextView) -> String?
     func sqlTextViewDidRequestExpandWildcards(_ textView: SQLTextView)
     func sqlTextViewDidChangeCaret(_ textView: SQLTextView)
 }
@@ -262,7 +264,13 @@ final class SQLTextView: NSTextView {
             // The list for this caret position may still be on its way; wait for it
             // once rather than concluding there is nothing to show.
             if !isRefresh { pendingCompletionForce = force }
-            completionPanel.hide()
+            // On the second pass there is genuinely nothing — and after a dot, an
+            // empty popup and a popup that never opened look the same. Say why.
+            if isRefresh, let message = delegate.sqlTextViewCompletionMessage(self) {
+                showMessage(message)
+            } else {
+                completionPanel.hide()
+            }
             return
         }
 
@@ -287,7 +295,22 @@ final class SQLTextView: NSTextView {
         completionPanel.show(entries: entries, below: caretRect(), in: self)
     }
 
+    /// One unselectable row explaining why the list is empty.
+    private func showMessage(_ message: String) {
+        let item = CompletionItem(id: "info:\(message)", label: message, kind: .info,
+                                  detail: "", documentation: "", insertText: "",
+                                  sortPriority: 0)
+        completionPanel.onChoose = { [weak self] _ in self?.completionPanel.hide() }
+        completionPanel.show(entries: [CompletionEntry(item: item, positions: [])],
+                             below: caretRect(), in: self)
+    }
+
     func commitCompletion() {
+        // An explanation is not a completion: Return and Tab dismiss it.
+        if completionPanel.selectedItem?.kind == .info {
+            completionPanel.hide()
+            return
+        }
         guard let item = completionPanel.selectedItem else {
             completionPanel.hide()
             return
