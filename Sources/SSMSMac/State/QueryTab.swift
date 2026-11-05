@@ -89,6 +89,9 @@ final class QueryTab: ObservableObject, Identifiable {
     /// Why the list is empty, when it is. Shown as the single row of the popup.
     @Published private(set) var completionMessage: String?
     @Published private(set) var isLoadingCatalog = false
+    /// When the last catalog read failed. A failure that repeats on every keystroke is
+    /// a connection attempt per keystroke, so an automatic retry waits.
+    private var catalogFailedAt: Date?
     /// What the completion catalog is doing, shown in the status bar: a load in
     /// progress, what it found, or why it did not.
     @Published private(set) var intelliSenseStatus = ""
@@ -254,6 +257,7 @@ final class QueryTab: ObservableObject, Identifiable {
         let target = database
         catalogTask?.cancel()
         isLoadingCatalog = true
+        catalogFailedAt = nil
         intelliSenseStatus = "IntelliSense: reading \(target)…"
         catalogTask = Task { [weak self] in
             do {
@@ -276,15 +280,19 @@ final class QueryTab: ObservableObject, Identifiable {
                 // line, not as an error interrupting the results pane.
                 self?.intelliSenseStatus = "IntelliSense: \(target) could not be read"
                 self?.intelliSenseError = String(describing: error)
+                self?.catalogFailedAt = Date()
             }
             self?.isLoadingCatalog = false
         }
     }
 
     /// Start a catalog load only when none is running: typing must not cancel the
-    /// fetch it is waiting for, which would leave completion stuck on keywords.
+    /// fetch it is waiting for, which would leave completion stuck on keywords. A read
+    /// that just failed is not retried on the next keystroke either — that would be a
+    /// connection attempt per character. Refresh IntelliSense Cache always retries.
     private func ensureCatalogLoaded() {
         guard !isLoadingCatalog else { return }
+        if let failed = catalogFailedAt, Date().timeIntervalSince(failed) < 30 { return }
         refreshIntelliSenseCatalog()
     }
 
