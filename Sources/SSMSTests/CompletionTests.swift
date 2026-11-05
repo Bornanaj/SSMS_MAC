@@ -56,7 +56,7 @@ func runCompletionTests(_ t: TestRunner) {
         let alias = at("SELECT * FROM sales.Orders AS o WHERE o.|")
         t.expect(alias.isMemberContext, "a qualifier is a member context")
         t.equal(labels(alias).sorted(), ["CustomerId", "OrderId", "Placed"],
-                "the alias answers with that table's columns", labels(alias).joined(separator: ","))
+                "the alias answers with that table's columns")
         t.expect(alias.pendingColumns == nil, "nothing needs reading: the columns are there")
 
         // The same, written without AS, and with the table named in full.
@@ -65,7 +65,7 @@ func runCompletionTests(_ t: TestRunner) {
                 "an alias without AS is still an alias")
         let byName = at("SELECT * FROM dbo.Customers WHERE Customers.|")
         t.equal(labels(byName).sorted(), ["City", "CustomerId", "FullName"],
-                "a table can qualify its own columns", labels(byName).joined(separator: ","))
+                "a table can qualify its own columns")
 
         // A dot in the middle of typing a column name filters, it does not reset.
         let partial = at("SELECT * FROM dbo.Customers AS c WHERE c.Ci|")
@@ -80,8 +80,7 @@ func runCompletionTests(_ t: TestRunner) {
 
         // EXEC narrows a schema to the routines in it.
         let exec = at("EXEC sales.|")
-        t.equal(labels(exec), ["RecalculateTotals"], "EXEC offers procedures only",
-                labels(exec).joined(separator: ","))
+        t.equal(labels(exec), ["RecalculateTotals"], "EXEC offers procedures only")
 
         // A table whose columns have not been read yet asks for them rather than
         // answering with an empty list.
