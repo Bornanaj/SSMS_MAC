@@ -144,7 +144,9 @@ swift build -c release          # libraries and executables
 **Query editor**
 - T‑SQL syntax colouring, line numbers, current‑line highlight
 - IntelliSense that understands aliases: `c.` after `FROM dbo.Customers AS c` lists that
-  table's columns; `EXEC sales.` lists only procedures
+  table's columns; `EXEC sales.` lists only procedures. It finds the statement around
+  the caret without semicolons, keeps a subquery's tables inside it, and completes
+  CTEs, derived tables, temp tables and table variables the script itself defines
 - Signature help, snippets, block indent, comment toggle, SQL formatter
 - `GO` batch splitting including `GO 5`, comment‑ and string‑aware
 - F5 executes, ⇧F5 executes the selection, ⌘. cancels (a real TDS attention)

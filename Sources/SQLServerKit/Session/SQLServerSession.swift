@@ -114,6 +114,18 @@ public actor SQLServerSession: Identifiable {
         }
     }
 
+    private var intelliSenseProvider: IntelliSenseProvider?
+
+    /// The IntelliSense catalog for this server, shared by every query window on it.
+    /// A provider per window read the whole database once per window, with a
+    /// connection each, which on a large database was a visible wait per tab.
+    public var intelliSense: IntelliSenseProvider {
+        if let intelliSenseProvider { return intelliSenseProvider }
+        let provider = IntelliSenseProvider(session: self)
+        intelliSenseProvider = provider
+        return provider
+    }
+
     public func close() async {
         closed = true
         try? await metadataConnection.close()

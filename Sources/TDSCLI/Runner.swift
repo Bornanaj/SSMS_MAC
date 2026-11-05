@@ -353,6 +353,24 @@ struct Runner {
             print("signature: \(help)")
         }
 
+        // Every query window on a session shares one catalog: two windows opening at
+        // once cause one read, a window opened later reads nothing, and only Refresh
+        // IntelliSense Cache reads again.
+        let shared = await session.intelliSense
+        async let firstWindow = shared.refresh(database: "ShopDemo")
+        async let secondWindow = shared.refresh(database: "ShopDemo")
+        let (first, second) = try await (firstWindow, secondWindow)
+        let later = try await shared.refresh(database: "ShopDemo")
+        let forced = try await shared.refresh(database: "ShopDemo", force: true)
+        let oneRead = first.fetchedAt == second.fetchedAt
+        let reused = later.fetchedAt == first.fetchedAt
+        let reread = forced.fetchedAt > first.fetchedAt
+        print("shared catalog: one read for two windows=\(oneRead) reused later=\(reused) "
+              + "forced re-read=\(reread)")
+        guard oneRead && reused && reread else {
+            throw SQLServerError.invalidProfile("the IntelliSense catalog is not shared across windows")
+        }
+
         print("--- formatter ---")
         print(SQLFormatter(style: SQLFormatter.Style()).format(sampleScript))
     }

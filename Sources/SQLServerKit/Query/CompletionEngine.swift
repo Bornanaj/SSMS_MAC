@@ -47,7 +47,8 @@ public struct CompletionEngine: Sendable {
         }
         func answer(_ items: [CompletionItem]) -> CompletionResult {
             CompletionResult(items: items, isMemberContext: isMemberContext,
-                             hasCatalog: catalog != nil)
+                             hasCatalog: catalog != nil,
+                             pendingColumns: unreadTables(in: context.sources))
         }
 
         // An ON clause with more than one table in scope is asking for the foreign key
@@ -90,11 +91,11 @@ public struct CompletionEngine: Sendable {
             let members = memberCompletions(qualifier: qualifier, context: context,
                                             catalog: catalog)
             var memberAnswer = answer(members.items)
-            memberAnswer.pendingColumns = members.pendingColumns
             if members.items.isEmpty {
                 // Nothing to offer after a dot is the one case where silence is
                 // indistinguishable from a broken editor, so it says why.
                 memberAnswer.message = emptyMemberReason(qualifier: qualifier,
+                                                         context: context,
                                                          pending: members.pendingColumns)
             }
             return memberAnswer
@@ -105,8 +106,9 @@ public struct CompletionEngine: Sendable {
                 : []
             // Only a table reference takes an alias; the same table offered inside a
             // SELECT list or a WHERE clause must insert its bare name.
-            return answer(tableCompletions(catalog: catalog, aliasesInScope: aliases,
-                                           withAliases: generatesAliases)
+            return answer(localTableCompletions(context: context)
+                + tableCompletions(catalog: catalog, aliasesInScope: aliases,
+                                   withAliases: generatesAliases)
                 + schemaCompletions(catalog: catalog))
 
         case .procedureReference:
@@ -128,17 +130,25 @@ public struct CompletionEngine: Sendable {
     }
 
     /// The sentence shown in place of a member list that came back empty.
-    private func emptyMemberReason(qualifier: String, pending: ObjectReference?) -> String {
+    private func emptyMemberReason(qualifier: String, context: IntelliSenseContext,
+                                   pending: ObjectReference?) -> String {
         guard let catalog else {
             return "IntelliSense has not read this database yet"
         }
         if let pending {
             return "Reading the columns of \(pending.schema).\(pending.name)…"
         }
+        let bare = IntelliSenseCatalog.unquote(qualifier)
+        if let foreign = context.sources.first(where: { $0.isCalled(bare) && isInAnotherDatabase($0) }),
+           let database = foreign.database {
+            return "IntelliSense has read \(catalog.database) only, not \(database)"
+        }
+        if let local = context.sources.first(where: { $0.isCalled(bare) && $0.local != nil })?.local {
+            return "\(local.description) has no named columns"
+        }
         if !catalog.isComplete {
             return "IntelliSense is still reading \(catalog.database)…"
         }
-        let bare = IntelliSenseCatalog.unquote(qualifier)
         return "No table, view or alias called \(bare) is in scope"
     }
 
@@ -208,19 +218,21 @@ public struct CompletionEngine: Sendable {
 
     private func columnCompletions(context: IntelliSenseContext,
                                    catalog: IntelliSenseCatalog?) -> [CompletionItem] {
-        guard let catalog else { return [] }
         var items: [CompletionItem] = []
         var seen = Set<String>()
 
         for source in context.sources {
-            guard let object = catalog.object(named: source.table, schema: source.schema) else { continue }
-            for column in object.columns {
+            let columns = columns(of: source)
+            guard !columns.isEmpty else { continue }
+            let origin = source.local?.description
+                ?? catalog?.object(named: source.table, schema: source.schema)?.qualifiedName
+                ?? source.table
+            for column in columns {
                 let key = column.name.lowercased()
                 // A name that appears in two sources still deserves one entry each,
                 // qualified by the alias so the user can tell them apart.
-                let qualifier = source.alias ?? object.name
-                let detail = "\(qualifier) · \(column.typeName)"
-                    + (column.isNullable ? ", null" : ", not null")
+                let qualifier = source.alias ?? source.table
+                let detail = "\(qualifier) · \(describe(column, origin: origin))"
                 var item = CompletionItem.make(label: column.name,
                                                kind: .column,
                                                detail: detail,
@@ -232,12 +244,93 @@ public struct CompletionEngine: Sendable {
                 item.id = "column:\(qualifier.lowercased()).\(column.name.lowercased())"
                 items.append(item)
             }
-            if let alias = source.alias {
-                items.append(.make(label: alias, kind: .alias,
-                                   detail: object.qualifiedName, priority: 40))
+            if let alias = source.alias, alias.caseInsensitiveCompare(source.table) != .orderedSame {
+                items.append(.make(label: alias, kind: .alias, detail: origin, priority: 40))
             }
         }
         return items
+    }
+
+    /// CTEs, temp tables and table variables the script has defined by the caret.
+    private func localTableCompletions(context: IntelliSenseContext) -> [CompletionItem] {
+        context.localDefinitions.map { definition in
+            CompletionItem(id: "local:\(definition.name.lowercased())",
+                           label: definition.name, kind: .table,
+                           detail: definition.description, documentation: "",
+                           insertText: definition.name, sortPriority: 90)
+        }
+    }
+
+    /// The type and nullability of a catalog column, or where a column with no
+    /// type information came from.
+    private func describe(_ column: IntelliSenseColumn, origin: String) -> String {
+        guard !column.typeName.isEmpty else { return origin }
+        return column.typeName + (column.isNullable ? ", null" : ", not null")
+    }
+
+    /// The columns a source has: the catalog's for a table, its own definition's for
+    /// a CTE, a derived table, a temp table or a table variable.
+    private func columns(of source: IntelliSenseContext.Source, depth: Int = 0) -> [IntelliSenseColumn] {
+        if let local = source.local { return columns(of: local, depth: depth) }
+        guard let catalog, !isInAnotherDatabase(source),
+              let object = catalog.object(named: source.table, schema: source.schema)
+        else { return [] }
+        return object.columns
+    }
+
+    /// A three-part name for a database the catalog does not cover. Answering it
+    /// from a same-named table in this database would be a wrong answer, not a guess.
+    private func isInAnotherDatabase(_ source: IntelliSenseContext.Source) -> Bool {
+        guard let database = source.database, let catalog else { return false }
+        return database.caseInsensitiveCompare(catalog.database) != .orderedSame
+    }
+
+    private func columns(of definition: LocalDefinition, depth: Int) -> [IntelliSenseColumn] {
+        // A CTE built on a CTE built on a CTE ends somewhere; a cycle does not.
+        guard depth < 8 else { return [] }
+        var result: [IntelliSenseColumn] = []
+        for column in definition.columns {
+            switch column {
+            case .named(let name):
+                result.append(IntelliSenseColumn(name: name, typeName: "", isNullable: true,
+                                                 isPrimaryKey: false, ordinal: result.count + 1))
+            case .star(let qualifier):
+                for source in definition.sources
+                where qualifier.map(source.isCalled) ?? true {
+                    for column in columns(of: source, depth: depth + 1) {
+                        var copy = column
+                        copy.ordinal = result.count + 1
+                        result.append(copy)
+                    }
+                }
+            }
+        }
+        return result
+    }
+
+    /// Every table the sources in scope read, directly or through a CTE, whose
+    /// columns have not arrived yet: the window fetches them and asks again.
+    private func unreadTables(in sources: [IntelliSenseContext.Source]) -> [ObjectReference] {
+        var seen = Set<ObjectReference>()
+        return sources.flatMap { unreadTables(of: $0) }.filter { seen.insert($0).inserted }
+    }
+
+    /// Catalog tables a definition reads through a star whose columns have not been
+    /// read yet, so the caller can fetch them.
+    private func unreadTables(of source: IntelliSenseContext.Source, depth: Int = 0) -> [ObjectReference] {
+        guard depth < 8 else { return [] }
+        if let local = source.local {
+            return local.columns.flatMap { column -> [ObjectReference] in
+                guard case .star(let qualifier) = column else { return [] }
+                return local.sources
+                    .filter { qualifier.map($0.isCalled) ?? true }
+                    .flatMap { unreadTables(of: $0, depth: depth + 1) }
+            }
+        }
+        guard let catalog, !isInAnotherDatabase(source),
+              let object = catalog.object(named: source.table, schema: source.schema),
+              object.columns.isEmpty else { return [] }
+        return [ObjectReference(schema: object.schema, name: object.name)]
     }
 
     /// Members of a qualifier, plus the object whose columns have to be read before
@@ -246,25 +339,30 @@ public struct CompletionEngine: Sendable {
                                    context: IntelliSenseContext,
                                    catalog: IntelliSenseCatalog?)
         -> (items: [CompletionItem], pendingColumns: ObjectReference?) {
-        guard let catalog else { return ([], nil) }
         let bare = IntelliSenseCatalog.unquote(qualifier)
 
-        // An alias in the current statement wins over a schema of the same name.
-        if let source = context.sources.first(where: {
-            $0.alias?.caseInsensitiveCompare(bare) == .orderedSame
-                || $0.table.caseInsensitiveCompare(bare) == .orderedSame
-        }), let object = catalog.object(named: source.table, schema: source.schema) {
-            let pending = object.columns.isEmpty
-                ? ObjectReference(schema: object.schema, name: object.name)
-                : nil
-            return (object.columns.map { column in
+        // An alias or table in the current statement wins over a schema of the same
+        // name. Several sources can be called the same thing (UPDATE o … FROM … o);
+        // the first that has columns answers.
+        var pending: ObjectReference?
+        for source in context.sources where source.isCalled(bare) {
+            let columns = columns(of: source)
+            if columns.isEmpty {
+                pending = pending ?? unreadTables(of: source).first
+                continue
+            }
+            let origin = source.local?.description
+                ?? catalog?.object(named: source.table, schema: source.schema)?.qualifiedName
+                ?? source.table
+            return (columns.map { column in
                 CompletionItem.make(label: column.name, kind: .column,
-                                    detail: "\(column.typeName)"
-                                        + (column.isNullable ? ", null" : ", not null"),
+                                    detail: describe(column, origin: origin),
                                     documentation: column.isPrimaryKey ? "Primary key" : "",
                                     priority: column.ordinal)
-            }, pending)
+            }, nil)
         }
+        if let pending { return ([], pending) }
+        guard let catalog else { return ([], nil) }
 
         if let object = catalog.object(named: bare, schema: nil) {
             let pending = object.columns.isEmpty

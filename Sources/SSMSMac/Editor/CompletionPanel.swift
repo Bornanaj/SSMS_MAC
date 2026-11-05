@@ -277,3 +277,29 @@ final class CompletionPanelController {
         return panel
     }
 }
+
+/// The keys the completion list owns while it is up, resolved from a key event.
+///
+/// macOS stamps the arrow, page and keypad keys with the numericPad and function
+/// flags, so they are not modifiers here: a check that only accepted an empty flag
+/// set never saw an arrow key at all, and the arrows moved the caret instead of the
+/// selection. Shift is allowed through; anything else (Command-Down, say) belongs
+/// to the editor.
+enum CompletionKey: Equatable {
+    case up, down, pageUp, pageDown, commit, dismiss
+
+    static func resolve(keyCode: UInt16, flags: NSEvent.ModifierFlags) -> CompletionKey? {
+        let modifiers = flags.intersection(.deviceIndependentFlagsMask)
+            .subtracting([.numericPad, .function])
+        guard modifiers.isEmpty || modifiers == [.shift] else { return nil }
+        switch keyCode {
+        case 126: return .up
+        case 125: return .down
+        case 116: return .pageUp
+        case 121: return .pageDown
+        case 36, 76, 48: return .commit    // return, keypad enter, tab
+        case 53: return .dismiss           // escape
+        default: return nil
+        }
+    }
+}

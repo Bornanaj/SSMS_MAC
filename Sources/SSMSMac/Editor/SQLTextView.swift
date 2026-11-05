@@ -79,24 +79,17 @@ final class SQLTextView: NSTextView {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
 
         // While the list is up it owns the navigation keys, and nothing else.
-        if completionPanel.isVisible, flags.isEmpty || flags == [.shift] {
-            switch event.keyCode {
-            case 126: completionPanel.moveSelection(by: -1); return          // up
-            case 125: completionPanel.moveSelection(by: 1); return           // down
-            case 116: completionPanel.moveSelection(by: -8); return          // page up
-            case 121: completionPanel.moveSelection(by: 8); return           // page down
-            case 36, 76:                                                     // return, enter
-                commitCompletion()
-                return
-            case 48:                                                         // tab
-                commitCompletion()
-                return
-            case 53:                                                         // escape
-                completionPanel.hide()
-                return
-            default:
-                break
+        if completionPanel.isVisible,
+           let key = CompletionKey.resolve(keyCode: event.keyCode, flags: event.modifierFlags) {
+            switch key {
+            case .up: completionPanel.moveSelection(by: -1)
+            case .down: completionPanel.moveSelection(by: 1)
+            case .pageUp: completionPanel.moveSelection(by: -8)
+            case .pageDown: completionPanel.moveSelection(by: 8)
+            case .commit: commitCompletion()
+            case .dismiss: completionPanel.hide()
             }
+            return
         }
 
         // F5 executes; Cmd+. cancels, matching the SSMS bindings people have in muscle memory.

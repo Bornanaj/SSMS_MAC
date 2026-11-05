@@ -132,6 +132,35 @@ enum EditorCheck {
             }
         }
 
+        // The completion list owns the navigation keys while it is up. macOS stamps
+        // the arrow, page and keypad keys with the numericPad and function flags, so
+        // a check for "no modifiers" that forgets them hands every arrow key back to
+        // the text view, which moves the caret instead of the selection.
+        print("\n▸ completion keys")
+        let arrowFlags: NSEvent.ModifierFlags = [.numericPad, .function]
+        check("down arrow moves the selection",
+              CompletionKey.resolve(keyCode: 125, flags: arrowFlags) == .down)
+        check("up arrow moves the selection",
+              CompletionKey.resolve(keyCode: 126, flags: arrowFlags) == .up)
+        check("shift with an arrow still moves the selection",
+              CompletionKey.resolve(keyCode: 125, flags: arrowFlags.union(.shift)) == .down)
+        check("page down jumps the selection",
+              CompletionKey.resolve(keyCode: 121, flags: [.function]) == .pageDown)
+        check("page up jumps the selection",
+              CompletionKey.resolve(keyCode: 116, flags: [.function]) == .pageUp)
+        check("return commits",
+              CompletionKey.resolve(keyCode: 36, flags: []) == .commit)
+        check("keypad enter commits",
+              CompletionKey.resolve(keyCode: 76, flags: [.numericPad]) == .commit)
+        check("tab commits",
+              CompletionKey.resolve(keyCode: 48, flags: []) == .commit)
+        check("escape dismisses",
+              CompletionKey.resolve(keyCode: 53, flags: []) == .dismiss)
+        check("command-down is left to the editor",
+              CompletionKey.resolve(keyCode: 125, flags: arrowFlags.union(.command)) == nil)
+        check("a letter is left to the editor",
+              CompletionKey.resolve(keyCode: 0, flags: []) == nil)
+
         print("")
         if failures.isEmpty {
             print("EDITOR CHECK PASSED")

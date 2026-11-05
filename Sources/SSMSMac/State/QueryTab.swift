@@ -209,7 +209,7 @@ final class QueryTab: ObservableObject, Identifiable {
                let row = spidResult.resultSets.first?.dictionaries().first {
                 self.spid = row.int("spid")
             }
-            self.intelliSense = IntelliSenseProvider(session: session)
+            self.intelliSense = await session.intelliSense
             await refreshDatabaseList()
             refreshIntelliSenseCatalog()
         } catch {
@@ -251,8 +251,10 @@ final class QueryTab: ObservableObject, Identifiable {
     }
 
     /// Warm the IntelliSense catalog in the background; completions fall back to
-    /// keywords until it lands.
-    func refreshIntelliSenseCatalog() {
+    /// keywords until it lands. The catalog is the session's, so a window opened on
+    /// a database another window has read gets it at once; `force` is Refresh
+    /// IntelliSense Cache, which reads again regardless.
+    func refreshIntelliSenseCatalog(force: Bool = false) {
         guard let intelliSense, !database.isEmpty else { return }
         let target = database
         catalogTask?.cancel()
@@ -261,7 +263,7 @@ final class QueryTab: ObservableObject, Identifiable {
         intelliSenseStatus = "IntelliSense: reading \(target)…"
         catalogTask = Task { [weak self] in
             do {
-                let catalog = try await intelliSense.refresh(database: target) { count in
+                let catalog = try await intelliSense.refresh(database: target, force: force) { count in
                     Task { @MainActor [weak self] in
                         guard self?.isLoadingCatalog == true else { return }
                         self?.intelliSenseStatus = "IntelliSense: \(count) objects, "
@@ -318,10 +320,10 @@ final class QueryTab: ObservableObject, Identifiable {
                 self.completionMessage = result.message
                 self.onCompletionsUpdated?()
 
-                // "alias." before that table's columns have been read: fetch just
+                // A table in scope whose columns have not been read: fetch just
                 // those, then ask again. The fetch happens here rather than inside the
                 // completion call, which runs on every keystroke.
-                if let pending = result.pendingColumns {
+                for pending in result.pendingColumns {
                     self.fetchColumnsThenRetry(pending, script: source, offset: offset)
                 }
                 // Nothing to complete against usually means the catalog never

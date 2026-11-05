@@ -201,16 +201,16 @@ public struct CompletionResult: Sendable {
     public var items: [CompletionItem]
     public var isMemberContext: Bool
     public var hasCatalog: Bool
-    /// Set when the answer needs columns the catalog has not read yet. The caller reads
+    /// Tables in scope whose columns the catalog has not read yet. The caller reads
     /// them and asks again; nothing is fetched while the list is being computed.
-    public var pendingColumns: ObjectReference?
+    public var pendingColumns: [ObjectReference]
     /// Why there is nothing to offer, when there is nothing to offer. An empty popup
     /// and a popup that never opened look identical, and both read as "IntelliSense is
     /// broken"; this is what the editor shows instead.
     public var message: String?
 
     public init(items: [CompletionItem], isMemberContext: Bool, hasCatalog: Bool,
-                pendingColumns: ObjectReference? = nil, message: String? = nil) {
+                pendingColumns: [ObjectReference] = [], message: String? = nil) {
         self.items = items
         self.isMemberContext = isMemberContext
         self.hasCatalog = hasCatalog
@@ -237,11 +237,37 @@ public actor IntelliSenseProvider {
         catalogs[database.lowercased()]
     }
 
+    /// Reads in flight, so two windows asking for the same database cause one read.
+    private var refreshes: [String: Task<IntelliSenseCatalog, Error>] = [:]
+    /// How long a complete catalog is trusted before a new window reads it again.
+    /// Refresh IntelliSense Cache ignores this.
+    private let catalogLifetime: TimeInterval = 15 * 60
+
     /// `onOutline` is called with the object count as soon as the names are in, which
-    /// is what the editor can start completing against.
+    /// is what the editor can start completing against. A complete catalog read
+    /// recently is returned as it is unless `force` is set; a read already under way
+    /// for the same database is joined rather than repeated.
     @discardableResult
-    public func refresh(database: String,
+    public func refresh(database: String, force: Bool = false,
                         onOutline: (@Sendable (Int) -> Void)? = nil) async throws -> IntelliSenseCatalog {
+        let key = database.lowercased()
+        if !force, let cached = catalogs[key], cached.isComplete,
+           Date().timeIntervalSince(cached.fetchedAt) < catalogLifetime {
+            return cached
+        }
+        if let inFlight = refreshes[key] {
+            return try await inFlight.value
+        }
+        let task = Task<IntelliSenseCatalog, Error> {
+            defer { refreshes[key] = nil }
+            return try await load(database: database, onOutline: onOutline)
+        }
+        refreshes[key] = task
+        return try await task.value
+    }
+
+    private func load(database: String,
+                      onOutline: (@Sendable (Int) -> Void)?) async throws -> IntelliSenseCatalog {
         // The catalog is a big read, and the session's metadata connection is shared
         // with the Object Explorer and every properties sheet. On a production
         // database that read takes long enough to stall all of them, so it gets a
@@ -577,14 +603,33 @@ struct IntelliSenseContext {
     }
 
     struct Source {
+        /// The database of a three-part name, which the catalog may not cover.
+        var database: String?
         var schema: String?
         var table: String
         var alias: String?
+        /// The parenthesised groups the reference sits in, outermost first, as the
+        /// indices of their opening tokens. A source is visible from inside its own
+        /// group and anything nested in it, so what a subquery reads stays inside it
+        /// while the outer query stays visible to a correlated one.
+        var path: [Int] = []
+        /// Set when the script defines the source itself: a CTE, a derived table, a
+        /// temp table or a table variable.
+        var local: LocalDefinition?
+
+        /// Whether `name` is this source's alias or, failing that, its table.
+        func isCalled(_ name: String) -> Bool {
+            if let alias, alias.caseInsensitiveCompare(name) == .orderedSame { return true }
+            return table.caseInsensitiveCompare(name) == .orderedSame
+        }
     }
 
     var kind: Kind = .general
     var sources: [Source] = []
     var variables: [String] = []
+    /// CTEs, temp tables and table variables the script has defined by the caret, so
+    /// a FROM can offer them alongside the catalog's tables.
+    var localDefinitions: [LocalDefinition] = []
     /// True when the statement is an EXEC, so only routines make sense.
     var prefersRoutines = false
     /// True when the caret sits in a JOIN ... ON clause.
@@ -614,12 +659,18 @@ struct IntelliSenseContext {
         }
 
         let statement = statementRange(significant, containing: caretIndex)
-        context.sources = parseSources(significant, in: statement)
+        let definitions = LocalSources.batchDefinitions(significant, before: statement)
+            + LocalSources.cteDefinitions(significant, in: statement)
+        context.localDefinitions = definitions
+        let caretPath = groupPath(significant, at: caretIndex, in: statement)
+        context.sources = parseSources(significant, in: statement, definitions: definitions)
+            .filter { caretPath.starts(with: $0.path) }
 
         let current = significant[caretIndex]
         let isPartialWord = current.start + current.length == offset
             && (current.kind == .identifier || current.kind == .keyword
-                || current.kind == .dataType || current.kind == .builtInFunction)
+                || current.kind == .dataType || current.kind == .builtInFunction
+                || current.kind == .tempTable)
         // When the caret sits at the end of a word, the meaningful keyword is the one before it.
         let anchorIndex = isPartialWord ? caretIndex - 1 : caretIndex
         guard anchorIndex >= 0 else {
@@ -646,9 +697,12 @@ struct IntelliSenseContext {
             let qualifierIndex = anchorIndex - 1
             if qualifierIndex >= 0 {
                 let qualifier = significant[qualifierIndex]
-                if qualifier.kind == .identifier || qualifier.kind == .quotedIdentifier {
+                switch qualifier.kind {
+                case .identifier, .quotedIdentifier, .tempTable, .variable:
                     context.kind = .memberOf(qualifier.text)
                     return context
+                default:
+                    break
                 }
             }
         }
@@ -689,39 +743,37 @@ struct IntelliSenseContext {
     /// query in the same script do not leak in.
     private static func statementRange(_ tokens: [TSQLToken],
                                        containing index: Int) -> Range<Int> {
-        var start = 0
-        var end = tokens.count
-        var cursor = index
-        while cursor > 0 {
-            let token = tokens[cursor]
-            if token.kind == .punctuation && token.text == ";" { start = cursor + 1; break }
-            if token.kind == .keyword && token.text.caseInsensitiveCompare("GO") == .orderedSame {
-                start = cursor + 1
-                break
-            }
-            cursor -= 1
-        }
-        cursor = index + 1
-        while cursor < tokens.count {
-            let token = tokens[cursor]
-            if token.kind == .punctuation && token.text == ";" { end = cursor; break }
-            cursor += 1
-        }
-        return start..<max(start, end)
+        TSQLStatements.range(of: tokens, containing: index)
     }
 
-    /// Pull `table alias` and `table AS alias` pairs out of FROM/JOIN clauses.
-    private static func parseSources(_ tokens: [TSQLToken], in range: Range<Int>) -> [Source] {
+    /// The groups the token at `index` sits in, outermost first. An opening
+    /// parenthesis at `index` counts: the caret after it is inside.
+    private static func groupPath(_ tokens: [TSQLToken], at index: Int,
+                                  in range: Range<Int>) -> [Int] {
+        var path: [Int] = []
+        guard range.lowerBound <= index else { return path }
+        for cursor in range.lowerBound...index where tokens[cursor].kind == .punctuation {
+            if tokens[cursor].text == "(" { path.append(cursor) }
+            else if tokens[cursor].text == ")" { _ = path.popLast() }
+        }
+        return path
+    }
+
+    /// Pull the table references out of FROM, JOIN, APPLY, UPDATE, DELETE and INSERT
+    /// INTO clauses, with their aliases, noting which ones the script defines itself.
+    static func parseSources(_ tokens: [TSQLToken], in range: Range<Int>,
+                             definitions: [LocalDefinition]) -> [Source] {
         var sources: [Source] = []
         var index = range.lowerBound
+        var path: [Int] = []
 
-        func readName(_ start: inout Int) -> (schema: String?, name: String)? {
+        func readName(_ start: inout Int) -> (database: String?, schema: String?, name: String)? {
             guard start < range.upperBound else { return nil }
             var parts: [String] = []
             while start < range.upperBound {
                 let token = tokens[start]
                 guard token.kind == .identifier || token.kind == .quotedIdentifier
-                        || token.kind == .tempTable else { break }
+                        || token.kind == .tempTable || token.kind == .variable else { break }
                 parts.append(token.text)
                 start += 1
                 if start < range.upperBound, tokens[start].kind == .punctuation,
@@ -733,44 +785,106 @@ struct IntelliSenseContext {
             }
             guard let name = parts.last else { return nil }
             let schema = parts.count >= 2 ? parts[parts.count - 2] : nil
-            return (schema.map(IntelliSenseCatalog.unquote), IntelliSenseCatalog.unquote(name))
+            let database = parts.count >= 3 ? parts[parts.count - 3] : nil
+            return (database.map(IntelliSenseCatalog.unquote), schema.map(IntelliSenseCatalog.unquote),
+                    IntelliSenseCatalog.unquote(name))
+        }
+
+        func readAlias(_ start: inout Int) -> String? {
+            guard start < range.upperBound else { return nil }
+            let next = tokens[start]
+            if next.text.caseInsensitiveCompare("AS") == .orderedSame {
+                start += 1
+                guard start < range.upperBound,
+                      tokens[start].kind == .identifier || tokens[start].kind == .quotedIdentifier
+                else { return nil }
+                let alias = IntelliSenseCatalog.unquote(tokens[start].text)
+                start += 1
+                return alias
+            }
+            if next.kind == .identifier || next.kind == .quotedIdentifier,
+               !clauseBoundaries.contains(next.text.uppercased()) {
+                start += 1
+                return IntelliSenseCatalog.unquote(next.text)
+            }
+            return nil
+        }
+
+        func definition(named name: String) -> LocalDefinition? {
+            definitions.last { $0.name.caseInsensitiveCompare(name) == .orderedSame }
         }
 
         while index < range.upperBound {
             let token = tokens[index]
-            let upper = token.text.uppercased()
-            guard token.kind == .keyword || token.kind == .identifier,
-                  upper == "FROM" || upper == "JOIN" || upper == "UPDATE" || upper == "INTO" else {
+            if token.kind == .punctuation {
+                if token.text == "(" { path.append(index) } else if token.text == ")" { _ = path.popLast() }
                 index += 1
                 continue
             }
-            index += 1
-            guard let reference = readName(&index) else { continue }
-
-            var alias: String?
-            if index < range.upperBound {
-                let next = tokens[index]
-                if next.text.caseInsensitiveCompare("AS") == .orderedSame {
-                    index += 1
-                    if index < range.upperBound,
-                       tokens[index].kind == .identifier || tokens[index].kind == .quotedIdentifier {
-                        alias = IntelliSenseCatalog.unquote(tokens[index].text)
-                        index += 1
-                    }
-                } else if next.kind == .identifier,
-                          !IntelliSenseContext.clauseBoundaries.contains(next.text.uppercased()) {
-                    alias = IntelliSenseCatalog.unquote(next.text)
-                    index += 1
-                }
+            let upper = token.text.uppercased()
+            guard token.kind == .keyword || token.kind == .identifier,
+                  sourceKeywords.contains(upper) else {
+                index += 1
+                continue
             }
-            sources.append(Source(schema: reference.schema, table: reference.name, alias: alias))
+            if upper == "INTO" {
+                // INSERT INTO and MERGE INTO name a source; SELECT … INTO names a result.
+                let previous = index > range.lowerBound ? tokens[index - 1].text.uppercased() : ""
+                guard previous == "INSERT" || previous == "MERGE" else { index += 1; continue }
+            }
+            index += 1
+            let referencePath = path
+
+            // A derived table: FROM (SELECT …) [AS] alias [(columns)]. Its own sources
+            // are parsed by the loop as it walks into the group, with their deeper path.
+            if let body = LocalSources.group(openingAt: index, in: tokens, limit: range.upperBound) {
+                var cursor = body.upperBound
+                if let alias = readAlias(&cursor) {
+                    var columnList: Range<Int>?
+                    if let list = LocalSources.group(openingAt: cursor, in: tokens,
+                                                     limit: range.upperBound) {
+                        columnList = list
+                    }
+                    let local = LocalSources.derivedDefinition(
+                        named: alias, body: body, columnList: columnList, in: tokens,
+                        definitions: definitions)
+                    sources.append(Source(schema: nil, table: alias, alias: alias,
+                                          path: referencePath, local: local))
+                }
+                continue
+            }
+
+            guard let reference = readName(&index) else { continue }
+            // A table-valued function: its arguments come before the alias.
+            if let arguments = LocalSources.group(openingAt: index, in: tokens,
+                                                  limit: range.upperBound) {
+                index = arguments.upperBound
+            }
+            let alias = readAlias(&index)
+            var source = Source(database: reference.database, schema: reference.schema,
+                                table: reference.name, alias: alias, path: referencePath)
+            if reference.schema == nil { source.local = definition(named: reference.name) }
+            sources.append(source)
         }
-        return sources
+
+        // UPDATE o … FROM sales.Orders o: the first "o" is that alias, not a table.
+        let aliases = Set(sources.compactMap { $0.alias?.lowercased() })
+        return sources.filter { source in
+            !(source.alias == nil && source.local == nil
+                && aliases.contains(source.table.lowercased()))
+        }
     }
+
+    private static let sourceKeywords: Set<String> = [
+        "FROM", "JOIN", "UPDATE", "DELETE", "APPLY", "INTO"
+    ]
 
     private static let clauseBoundaries: Set<String> = [
         "WHERE", "ON", "INNER", "LEFT", "RIGHT", "FULL", "CROSS", "OUTER", "JOIN", "GROUP",
-        "ORDER", "HAVING", "UNION", "SET", "VALUES", "OPTION", "APPLY", "WITH", "SELECT"
+        "ORDER", "HAVING", "UNION", "SET", "VALUES", "OPTION", "APPLY", "WITH", "SELECT",
+        "EXCEPT", "INTERSECT", "FOR", "PIVOT", "UNPIVOT", "TABLESAMPLE", "OUTPUT", "WHEN",
+        "USING", "INSERT", "UPDATE", "DELETE", "MERGE", "DECLARE", "IF", "WHILE", "BEGIN",
+        "END", "RETURN", "PRINT", "EXEC", "EXECUTE", "CREATE", "ALTER", "DROP", "GO"
     ]
 
     /// The routine call whose argument list contains the caret, if any.

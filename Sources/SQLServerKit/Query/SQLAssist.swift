@@ -120,32 +120,11 @@ public enum SQLAssist {
     }
 
     private static func statementRange(_ tokens: [TSQLToken], containing offset: Int) -> Range<Int> {
-        var start = 0
-        var end = tokens.count
         var index = 0
         for (position, token) in tokens.enumerated() {
             if token.start + token.length <= offset { index = position }
         }
-        var cursor = index
-        while cursor > 0 {
-            let token = tokens[cursor]
-            if token.kind == .punctuation && token.text == ";" { start = cursor + 1; break }
-            if token.text.caseInsensitiveCompare("GO") == .orderedSame
-                && (token.kind == .keyword || token.kind == .identifier) {
-                start = cursor + 1
-                break
-            }
-            cursor -= 1
-        }
-        cursor = index + 1
-        while cursor < tokens.count {
-            if tokens[cursor].kind == .punctuation && tokens[cursor].text == ";" {
-                end = cursor
-                break
-            }
-            cursor += 1
-        }
-        return start..<max(start, end)
+        return TSQLStatements.range(of: tokens, containing: index)
     }
 
     // MARK: - Aliases

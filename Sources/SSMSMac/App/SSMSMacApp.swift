@@ -202,7 +202,7 @@ struct AppCommands: Commands {
                 .keyboardShortcut("d", modifiers: [.command, .option])
 
             Button("Refresh IntelliSense Cache") {
-                app.selectedTab?.refreshIntelliSenseCatalog()
+                app.selectedTab?.refreshIntelliSenseCatalog(force: true)
             }
             .keyboardShortcut("r", modifiers: [.command, .shift])
         }
