@@ -78,6 +78,9 @@ final class QueryTab: ObservableObject, Identifiable {
     /// The SPID of this window's own connection, which is what the DMV is keyed by.
     @Published private(set) var spid = 0
     private var liveStatsTask: Task<Void, Never>?
+    /// Objects whose columns are being read for a member list, so one slow table does
+    /// not get asked for again on every keystroke.
+    private var columnFetchesInFlight: Set<ObjectReference> = []
 
     @Published private(set) var completionItems: [CompletionItem] = []
     /// True when the last request was for "alias." or "schema.": the editor shows
@@ -303,6 +306,13 @@ final class QueryTab: ObservableObject, Identifiable {
                 self.completionItems = result.items
                 self.completionIsMemberContext = result.isMemberContext
                 self.onCompletionsUpdated?()
+
+                // "alias." before that table's columns have been read: fetch just
+                // those, then ask again. The fetch happens here rather than inside the
+                // completion call, which runs on every keystroke.
+                if let pending = result.pendingColumns {
+                    self.fetchColumnsThenRetry(pending, script: source, offset: offset)
+                }
                 // Nothing to complete against usually means the catalog never
                 // loaded; fetch it so the next keystroke has something to offer.
                 if !result.hasCatalog { self.ensureCatalogLoaded() }
@@ -524,6 +534,24 @@ final class QueryTab: ObservableObject, Identifiable {
             liveStatisticsMessage = "The query finished before any operator reported "
                 + "progress. Live statistics only show something for a query that runs "
                 + "long enough to be sampled."
+        }
+    }
+
+    /// Reads one object's columns and re-asks for completions, once. The guard stops
+    /// a table the catalog cannot see from being asked for on every keystroke.
+    private func fetchColumnsThenRetry(_ object: ObjectReference, script: String, offset: Int) {
+        guard let intelliSense, !columnFetchesInFlight.contains(object) else { return }
+        columnFetchesInFlight.insert(object)
+        let target = database
+        Task { [weak self] in
+            let added = await intelliSense.loadColumns(object, database: target)
+            guard let self else { return }
+            if added {
+                self.columnFetchesInFlight.remove(object)
+                self.requestCompletions(script: script, at: offset)
+            }
+            // When nothing was added the object stays in the set: there is nothing to
+            // read, and asking again would be a loop.
         }
     }
 
